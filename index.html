@@ -6,6 +6,7 @@
     <title>Mass Orbit Lab</title>
     <link rel="stylesheet" href="style.css" />
   </head>
+
   <body>
     <main class="app-shell">
       <header class="topbar">
@@ -14,19 +15,22 @@
           <h1>Mass Orbit Lab</h1>
           <p class="tagline">Hold to create mass. Drag and release to launch it into orbit.</p>
         </div>
-
-        <div class="top-actions">
-          <button id="clearButton" type="button">Clear Space</button>
-          <button id="pauseButton" type="button">Pause</button>
-        </div>
       </header>
 
       <section id="labArea" class="lab-area" aria-label="Mass Orbit Lab play area">
         <canvas id="spaceCanvas"></canvas>
 
+        <div class="lab-controls">
+          <button id="clearButton" type="button">Clear Space</button>
+          <button id="pauseButton" type="button">Pause</button>
+          <button id="fullscreenButton" type="button">Fullscreen</button>
+        </div>
+
         <aside class="observations" aria-live="polite">
           <h2 id="observationTitle">Observations</h2>
-          <p id="observationText">Press and hold anywhere to create mass. Drag before releasing to add velocity.</p>
+          <p id="observationText">
+            Press and hold anywhere to create mass. Drag before releasing to add velocity.
+          </p>
         </aside>
 
         <div class="hud" aria-label="Simulation stats">
@@ -38,7 +42,7 @@
         <div class="help-strip">
           <span>Hold = grow</span>
           <span>Drag = velocity</span>
-          <span>Slow collision = merge</span>
+          <span>Small impact = merge</span>
           <span>Fast collision = shatter</span>
         </div>
       </section>

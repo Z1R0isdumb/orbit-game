@@ -3,7 +3,6 @@
   --muted: rgba(246, 247, 251, 0.62);
   --line: rgba(255, 255, 255, 0.12);
   --panel: rgba(12, 14, 22, 0.78);
-  --glow: rgba(111, 76, 255, 0.28);
 }
 
 * {
@@ -26,6 +25,7 @@ body {
     #050607;
   background-size: 34px 34px, 34px 34px, 100% 100%, 100% 100%;
   padding: 24px;
+  overflow-x: hidden;
 }
 
 button {
@@ -51,7 +51,7 @@ button:active {
 }
 
 .app-shell {
-  width: min(1180px, 100%);
+  width: min(1280px, 100%);
   margin: 0 auto;
 }
 
@@ -80,23 +80,16 @@ h1 {
 }
 
 .tagline {
-  max-width: 600px;
+  max-width: 620px;
   margin: 16px 0 0;
   color: var(--muted);
   font-size: clamp(1rem, 2vw, 1.18rem);
   line-height: 1.45;
 }
 
-.top-actions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 10px;
-}
-
 .lab-area {
   position: relative;
-  min-height: clamp(560px, 72vh, 820px);
+  min-height: clamp(680px, 80vh, 980px);
   border: 1px solid var(--line);
   border-radius: 24px;
   overflow: hidden;
@@ -108,7 +101,9 @@ h1 {
     radial-gradient(circle at 92% 64%, rgba(255, 255, 255, 0.1) 0 1px, transparent 2px),
     #000;
   background-size: 100% 100%, 180px 150px, 230px 210px, 270px 230px, 310px 280px, 100% 100%;
-  box-shadow: 0 26px 90px rgba(0, 0, 0, 0.46), inset 0 0 90px rgba(66, 245, 215, 0.035);
+  box-shadow:
+    0 26px 90px rgba(0, 0, 0, 0.46),
+    inset 0 0 90px rgba(66, 245, 215, 0.035);
   cursor: crosshair;
   touch-action: none;
   user-select: none;
@@ -120,6 +115,22 @@ h1 {
   width: 100%;
   height: 100%;
   display: block;
+}
+
+.lab-controls {
+  position: absolute;
+  right: 18px;
+  top: 18px;
+  z-index: 20;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.lab-controls button {
+  background: rgba(0, 0, 0, 0.58);
+  backdrop-filter: blur(10px);
 }
 
 .observations {
@@ -163,10 +174,11 @@ h1 {
 .hud {
   position: absolute;
   right: 18px;
-  top: 18px;
+  top: 78px;
   display: grid;
   gap: 8px;
   pointer-events: none;
+  z-index: 10;
 }
 
 .hud span {
@@ -199,6 +211,7 @@ h1 {
   gap: 8px;
   transform: translateX(-50%);
   pointer-events: none;
+  z-index: 10;
 }
 
 .help-strip span {
@@ -212,6 +225,50 @@ h1 {
   white-space: nowrap;
 }
 
+body.game-fullscreen {
+  padding: 0;
+  overflow: hidden;
+}
+
+body.game-fullscreen .app-shell {
+  width: 100vw;
+  height: 100vh;
+  margin: 0;
+}
+
+body.game-fullscreen .topbar {
+  display: none;
+}
+
+body.game-fullscreen .lab-area {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  min-height: 100vh;
+  border: 0;
+  border-radius: 0;
+}
+
+body.game-fullscreen .lab-controls {
+  right: 18px;
+  top: 18px;
+}
+
+body.game-fullscreen .hud {
+  right: 18px;
+  top: 78px;
+}
+
+body.game-fullscreen .observations {
+  left: 18px;
+  bottom: 18px;
+}
+
+body.game-fullscreen .help-strip {
+  bottom: 18px;
+}
+
 @media (max-width: 740px) {
   body {
     padding: 14px;
@@ -222,23 +279,28 @@ h1 {
     flex-direction: column;
   }
 
-  .top-actions {
-    justify-content: stretch;
-  }
-
-  .top-actions button {
-    flex: 1;
-  }
-
   .lab-area {
     min-height: 620px;
     border-radius: 18px;
   }
 
-  .hud {
+  .lab-controls {
     left: 12px;
     right: 12px;
     top: 12px;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+  }
+
+  .lab-controls button {
+    padding: 10px 8px;
+    font-size: 0.78rem;
+  }
+
+  .hud {
+    left: 12px;
+    right: 12px;
+    top: 62px;
     grid-template-columns: repeat(3, 1fr);
   }
 
@@ -258,6 +320,42 @@ h1 {
 
   .help-strip {
     width: calc(100% - 24px);
-    bottom: 12px;
+  }
+}
+.lab-controls {
+  z-index: 100;
+  pointer-events: auto;
+}
+
+.lab-controls button {
+  min-width: 118px;
+  min-height: 46px;
+  padding: 13px 20px;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  background: rgba(10, 12, 18, 0.92);
+  color: rgba(255, 255, 255, 0.96);
+  box-shadow:
+    0 10px 30px rgba(0, 0, 0, 0.36),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.lab-controls button:hover {
+  background: rgba(30, 34, 48, 0.96);
+  border-color: rgba(255, 255, 255, 0.42);
+}
+
+.lab-controls button:active {
+  transform: translateY(1px) scale(0.98);
+}
+
+body.game-fullscreen .lab-controls {
+  z-index: 100;
+}
+
+@media (max-width: 740px) {
+  .lab-controls button {
+    min-width: 0;
+    min-height: 44px;
+    padding: 11px 8px;
   }
 }

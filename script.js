@@ -3,28 +3,49 @@ const canvas = document.getElementById("spaceCanvas");
 const ctx = canvas.getContext("2d");
 const clearButton = document.getElementById("clearButton");
 const pauseButton = document.getElementById("pauseButton");
+const fullscreenButton = document.getElementById("fullscreenButton");
 const bodyCount = document.getElementById("bodyCount");
 const massTotal = document.getElementById("massTotal");
 const debrisCount = document.getElementById("debrisCount");
 const observationTitle = document.getElementById("observationTitle");
 const observationText = document.getElementById("observationText");
 
-const COLORS = ["#f7c948", "#7c3cff", "#42f5d7", "#ff4f8b", "#7cff6b", "#f97316"];
+const COLORS = ["#f7c948", "#42f5d7", "#7c3cff", "#ff4f8b", "#7cff6b", "#f97316", "#60a5fa"];
 
-const G = 0.38;
-const SOFTENING = 3800;
+const G = 0.58;
+const SOFTENING = 760;
 const MIN_RADIUS = 10;
-const MAX_RADIUS = 115;
+const MAX_RADIUS = 110;
 const GROWTH_RATE = 0.04;
-const LAUNCH_SCALE = 0.04;
-const MAX_SPEED = 20;
-const ORBIT_ASSIST = 0.68;
-const ORBIT_CORRECTION = 0.0018;
-const SUN_ANCHOR_RATIO = 0.7;
-const COLLISION_DISTANCE = 0.86;
-const SLOW_MERGE_SPEED = 2.45;
-const MAX_TRAIL_POINTS = 520;
-const MAX_DEBRIS = 360;
+const LAUNCH_SCALE = 0.038;
+const MAX_SPEED = 24;
+
+const RELEASE_ASSIST = 0.34;
+const LOW_SPEED_RELEASE_ASSIST = 0.56;
+
+const CANDIDATE_ORBIT_CORRECTION = 0.011;
+const LOCKED_ORBIT_CORRECTION = 0.06;
+const MOON_LOCK_CORRECTION = 0.095;
+const LOCKED_RADIUS_CORRECTION = 0.024;
+const MOON_RADIUS_CORRECTION = 0.048;
+
+const COLLISION_DISTANCE = 0.9;
+const SLOW_MERGE_SPEED = 2.8;
+const MAX_TRAIL_POINTS = 620;
+const MAX_DEBRIS = 420;
+
+const ORBIT_SAMPLE_LIMIT = 180;
+const ORBIT_CONFIRM_SCORE = 64;
+const PHYSICS_STEP = 0.5;
+
+const TINY_IMPACT_MASS_RATIO = 0.08;
+const TINY_IMPACT_RADIUS_RATIO = 0.34;
+
+const THIRD_BODY_DAMPING = 0.008;
+const SMALL_BODY_INTERACTION = 0;
+
+const MOON_TARGET_DISTANCE_MULTIPLIER = 28;
+const MOON_LOCK_DISTANCE_MULTIPLIER = 38;
 
 let bodies = [];
 let debris = [];
@@ -76,6 +97,10 @@ function updateHud() {
 }
 
 function startDraft(event) {
+  if (event.target.closest(".lab-controls")) {
+    return;
+  }
+
   if (event.pointerType === "mouse" && event.button !== 0) {
     return;
   }
@@ -113,7 +138,7 @@ function startDraft(event) {
   try {
     labArea.setPointerCapture(event.pointerId);
   } catch (error) {
-    // Safe fallback for browsers that do not allow pointer capture here.
+    // Safe fallback.
   }
 
   startLoop();
@@ -129,11 +154,15 @@ function aimDraft(event) {
   }
 
   event.preventDefault();
-  const point = getPointerPosition(event);
 
+  const point = getPointerPosition(event);
   draftBody.aimX = point.x;
   draftBody.aimY = point.y;
 }
+
+
+
+
 
 function releaseDraft(event) {
   if (!draftBody) {
@@ -146,26 +175,46 @@ function releaseDraft(event) {
 
   updateDraftBody();
 
-  const velocity = getLaunchVelocity(draftBody);
-  const assistedVelocity = getAssistedOrbitVelocity(draftBody, velocity);
+draftBody.gravity = getGravityForBody(draftBody);
+
+  const userVelocity = getLaunchVelocity(draftBody);
+  const parent = chooseOrbitParent(draftBody);
+  const assistedVelocity = parent
+    ? getReleaseAssistedVelocity(draftBody, parent, userVelocity)
+    : userVelocity;
 
   draftBody.velocityX = assistedVelocity.x;
   draftBody.velocityY = assistedVelocity.y;
   draftBody.isDraft = false;
   draftBody.trail = [];
-
-  const target = findBestOrbitTarget(draftBody);
+  draftBody.recentDistances = [];
+  draftBody.angleHistory = [];
+  draftBody.orbitScore = 0;
+  draftBody.orbitTarget = parent ? parent.id : null;
+  draftBody.orbitAnnounced = false;
+  draftBody.lockedOrbit = false;
+  draftBody.orbitRadius = parent ? getDistance(draftBody, parent) : null;
+  draftBody.orbitKind = parent && !isMainMass(parent) ? "moon" : parent ? "planet" : "free";
 
   bodies.push(draftBody);
+  reassignParentLocks();
 
-  if (target && isLikelyOrbit(draftBody, target)) {
-    draftBody.orbitScore = 80;
-    draftBody.orbitTarget = target.id;
-    setObservation("Orbit Created", "You created an orbit. The body is balanced between falling inward and moving sideways.", 220);
+  if (parent) {
+    const isMoon = draftBody.orbitKind === "moon";
+
+    setObservation(
+      isMoon ? "Moon Path" : "Planet Path",
+      isMoon
+        ? "The small body is near a planet. If it curves around that planet, it will lock into a moon orbit."
+        : "The body is moving around the biggest mass. If it curves enough, it will lock into a circular orbit.",
+      180
+    );
   } else if (bodies.length === 1) {
-    setObservation("Observations", "Create a smaller mass nearby and drag sideways to give it orbital velocity.", 160);
-  } else {
-    setObservation("Observations", "The body is moving freely. Gravity may bend its path if it passes near a larger mass.", 130);
+    setObservation(
+      "Observations",
+      "Create another mass nearby and drag sideways to try forming an orbit.",
+      150
+    );
   }
 
   draftBody = null;
@@ -199,7 +248,8 @@ function makeBody({ x, y, radius, color, velocityX, velocityY, isDraft = false }
     x,
     y,
     radius,
-    mass: radius * radius,
+  mass: radius * radius,
+    gravity: 1,
     color,
     velocityX,
     velocityY,
@@ -207,26 +257,44 @@ function makeBody({ x, y, radius, color, velocityX, velocityY, isDraft = false }
     trail: [],
     orbitScore: 0,
     orbitTarget: null,
-    facets: createFacets()
+    orbitAnnounced: false,
+    lockedOrbit: false,
+    orbitKind: "free",
+    orbitRadius: null,
+    recentDistances: [],
+    angleHistory: [],
+    texture: createSurfaceTexture(color)
   };
 }
 
-function createFacets() {
-  const facets = [];
-  const count = 18;
+function createSurfaceTexture(baseColor) {
+  const bandCount = Math.floor(random(3, 6));
+  const bands = [];
+  const spots = [];
 
-  for (let i = 0; i < count; i++) {
-    facets.push({
-      start: (i / count) * Math.PI * 2,
-      end: ((i + 1.15) / count) * Math.PI * 2,
-      inner: 0.15 + Math.random() * 0.2,
-      outer: 0.78 + Math.random() * 0.26,
-      alpha: 0.08 + Math.random() * 0.18,
-      light: Math.random() > 0.5
+  for (let i = 0; i < bandCount; i++) {
+    bands.push({
+      offset: random(-0.55, 0.55),
+      width: random(0.1, 0.24),
+      alpha: random(0.08, 0.18),
+      color: shadeHex(baseColor, random(-35, 22)),
+      tilt: random(-0.9, 0.9)
     });
   }
 
-  return facets;
+  const spotCount = Math.floor(random(2, 7));
+
+  for (let i = 0; i < spotCount; i++) {
+    spots.push({
+      angle: random(0, Math.PI * 2),
+      distance: random(0.08, 0.48),
+      radius: random(0.08, 0.22),
+      alpha: random(0.08, 0.18),
+      color: shadeHex(baseColor, random(-32, 16))
+    });
+  }
+
+  return { bands, spots };
 }
 
 function startLoop() {
@@ -245,6 +313,7 @@ function stopLoopIfIdle() {
 
 function loop(now) {
   const delta = clamp((now - lastTime) / 16.666, 0.3, 2.2);
+
   lastTime = now;
 
   if (!isPaused) {
@@ -264,12 +333,20 @@ function loop(now) {
 
 function update(delta) {
   updateDraftBody();
-  applyGravity(delta);
-  applyOrbitCorrection(delta);
-  moveBodies(delta);
+  reassignParentLocks();
+
+  const steps = Math.max(1, Math.ceil(delta / PHYSICS_STEP));
+  const stepDelta = delta / steps;
+
+  for (let i = 0; i < steps; i++) {
+    applyGravity(stepDelta);
+    applyOrbitCorrection(stepDelta);
+    moveBodies(stepDelta);
+    handleCollisions();
+  }
+
   updateTrails();
   detectOrbits();
-  handleCollisions();
   updateDebris(delta);
 }
 
@@ -278,65 +355,190 @@ function applyGravity(delta) {
     for (let j = i + 1; j < bodies.length; j++) {
       const a = bodies[i];
       const b = bodies[j];
+
       const dx = b.x - a.x;
       const dy = b.y - a.y;
       const distSq = dx * dx + dy * dy;
       const dist = Math.sqrt(distSq);
 
-      if (dist < 1) continue;
+      if (dist < 1) {
+        continue;
+      }
 
       const nx = dx / dist;
       const ny = dy / dist;
 
-      let aAccel = (G * b.mass) / (distSq + SOFTENING);
-      let bAccel = (G * a.mass) / (distSq + SOFTENING);
+      let aAccel = (G * b.mass * b.gravity) / (distSq + SOFTENING);
+      let bAccel = (G * a.mass * a.gravity) / (distSq + SOFTENING);
 
-      if (actsLikeSun(a, b)) aAccel *= 0.04;
-      if (actsLikeSun(b, a)) bAccel *= 0.04;
+      aAccel *= getGravityMultiplierForPair(a, b);
+      bAccel *= getGravityMultiplierForPair(b, a);
 
       a.velocityX += nx * aAccel * delta;
       a.velocityY += ny * aAccel * delta;
+
       b.velocityX -= nx * bAccel * delta;
       b.velocityY -= ny * bAccel * delta;
     }
   }
 }
 
+function getGravityMultiplierForPair(bodyBeingPulled, sourceBody) {
+  const mainMass = getMainMass();
+
+  if (!mainMass) {
+    return 1;
+  }
+
+  if (bodyBeingPulled === mainMass) {
+    return 0;
+  }
+
+  const parent = getCurrentOrbitTarget(bodyBeingPulled);
+
+  if (parent && parent.id === sourceBody.id) {
+    return 1;
+  }
+
+  if (bodyBeingPulled.orbitKind === "moon") {
+    return THIRD_BODY_DAMPING;
+  }
+
+  if (sourceBody === mainMass) {
+    return 1;
+  }
+
+  return SMALL_BODY_INTERACTION;
+}
+
 function applyOrbitCorrection(delta) {
   bodies.forEach((body) => {
-    const target = findBestOrbitTarget(body);
+    const target = getCurrentOrbitTarget(body);
 
-    if (!target || body.mass >= target.mass * SUN_ANCHOR_RATIO) {
+    if (!target || body.mass >= target.mass) {
       return;
     }
 
-    const assisted = getAssistedOrbitVelocity(body, {
-      x: body.velocityX,
-      y: body.velocityY
-    });
+    const orbitStatus = evaluateOrbitCandidate(body, target);
 
-    body.velocityX = lerp(body.velocityX, assisted.x, ORBIT_CORRECTION * delta);
-    body.velocityY = lerp(body.velocityY, assisted.y, ORBIT_CORRECTION * delta);
+    if (!body.lockedOrbit && !orbitStatus.candidate) {
+      return;
+    }
+
+    if (!body.lockedOrbit && orbitStatus.candidate) {
+      const assistedCandidate = getCircularizedVelocity(
+        body,
+        target,
+        {
+          x: body.velocityX,
+          y: body.velocityY
+        },
+        1
+      );
+
+      body.velocityX = lerp(body.velocityX, assistedCandidate.x, CANDIDATE_ORBIT_CORRECTION * delta);
+      body.velocityY = lerp(body.velocityY, assistedCandidate.y, CANDIDATE_ORBIT_CORRECTION * delta);
+      return;
+    }
+
+    const assisted = getCircularizedVelocity(
+      body,
+      target,
+      {
+        x: body.velocityX,
+        y: body.velocityY
+      },
+      1
+    );
+
+    const velocityCorrection = body.orbitKind === "moon"
+      ? MOON_LOCK_CORRECTION
+      : LOCKED_ORBIT_CORRECTION;
+
+    body.velocityX = lerp(body.velocityX, assisted.x, velocityCorrection * delta);
+    body.velocityY = lerp(body.velocityY, assisted.y, velocityCorrection * delta);
+
+    const radiusCorrection = body.orbitKind === "moon"
+      ? MOON_RADIUS_CORRECTION
+      : LOCKED_RADIUS_CORRECTION;
+
+    correctOrbitRadius(body, target, radiusCorrection * delta);
   });
 }
 
+function correctOrbitRadius(body, target, strength) {
+  if (!body.orbitRadius) {
+    body.orbitRadius = getDistance(body, target);
+    return;
+  }
+
+  const dx = body.x - target.x;
+  const dy = body.y - target.y;
+  const distance = Math.sqrt(dx * dx + dy * dy);
+
+  if (distance < 1) {
+    return;
+  }
+
+  const nx = dx / distance;
+  const ny = dy / distance;
+  const desiredDistance = body.orbitRadius;
+  const difference = desiredDistance - distance;
+
+  body.x += nx * difference * strength;
+  body.y += ny * difference * strength;
+}
+
+function forceCircularOrbit(body, target) {
+  const dx = body.x - target.x;
+  const dy = body.y - target.y;
+  const distance = Math.sqrt(dx * dx + dy * dy);
+
+  if (distance < 1) {
+    return;
+  }
+
+  const orbitRadius = body.orbitRadius || distance;
+  const nx = dx / distance;
+  const ny = dy / distance;
+
+  body.x = target.x + nx * orbitRadius;
+  body.y = target.y + ny * orbitRadius;
+
+  let tangentX = -ny;
+  let tangentY = nx;
+
+  const currentRelativeVelocityX = body.velocityX - target.velocityX;
+  const currentRelativeVelocityY = body.velocityY - target.velocityY;
+
+  if (currentRelativeVelocityX * tangentX + currentRelativeVelocityY * tangentY < 0) {
+    tangentX = -tangentX;
+    tangentY = -tangentY;
+  }
+
+  const circularSpeed = getCircularOrbitSpeed(target, orbitRadius);
+
+  body.velocityX = target.velocityX + tangentX * circularSpeed;
+  body.velocityY = target.velocityY + tangentY * circularSpeed;
+}
+
+
+
+
 function moveBodies(delta) {
+  const mainMass = getMainMass();
+
   bodies.forEach((body) => {
     limitBodySpeed(body);
 
+    if (body === mainMass) {
+      body.velocityX = 0;
+      body.velocityY = 0;
+      return;
+    }
+
     body.x += body.velocityX * delta;
     body.y += body.velocityY * delta;
-
-    if (isDominantSun(body)) {
-      body.velocityX *= Math.pow(0.9, delta);
-      body.velocityY *= Math.pow(0.9, delta);
-
-      if (Math.abs(body.velocityX) < 0.01) body.velocityX = 0;
-      if (Math.abs(body.velocityY) < 0.01) body.velocityY = 0;
-    } else {
-      body.velocityX *= Math.pow(0.9996, delta);
-      body.velocityY *= Math.pow(0.9996, delta);
-    }
   });
 }
 
@@ -350,26 +552,170 @@ function updateTrails() {
   });
 }
 
+
+
+
+
 function detectOrbits() {
   bodies.forEach((body) => {
-    const target = findBestOrbitTarget(body);
+    const target = getCurrentOrbitTarget(body);
 
     if (!target) {
-      body.orbitScore = Math.max(0, body.orbitScore - 1);
       return;
     }
 
-    if (isLikelyOrbit(body, target)) {
-      body.orbitScore += 1;
-    } else {
-      body.orbitScore = Math.max(0, body.orbitScore - 1);
+    const dx = body.x - target.x;
+    const dy = body.y - target.y;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+    const angle = Math.atan2(dy, dx);
+
+    if (!body.recentDistances) {
+      body.recentDistances = [];
     }
 
-    if (body.orbitScore === 90) {
-      body.orbitTarget = target.id;
-      setObservation("Orbit Created", "A stable orbit formed. Distance and sideways velocity are working together.", 220);
+    if (!body.angleHistory) {
+      body.angleHistory = [];
+    }
+
+    body.recentDistances.push(distance);
+    body.angleHistory.push(angle);
+
+    if (body.recentDistances.length > ORBIT_SAMPLE_LIMIT) {
+      body.recentDistances.shift();
+    }
+
+    if (body.angleHistory.length > ORBIT_SAMPLE_LIMIT) {
+      body.angleHistory.shift();
+    }
+
+    const orbitStatus = evaluateOrbitCandidate(body, target);
+
+    if (orbitStatus.steady) {
+      body.orbitScore = Math.min(ORBIT_CONFIRM_SCORE + 40, body.orbitScore + 4);
+    } else if (orbitStatus.candidate) {
+      body.orbitScore = Math.min(ORBIT_CONFIRM_SCORE, body.orbitScore + 1);
+    } else {
+      body.orbitScore = Math.max(0, body.orbitScore - 3);
+    }
+
+    if (!body.lockedOrbit && body.orbitScore >= ORBIT_CONFIRM_SCORE && orbitStatus.steady) {
+      body.lockedOrbit = true;
+      body.orbitRadius = orbitStatus.averageDistance || distance;
+      body.trail = [];
+
+      forceCircularOrbit(body, target);
+
+      setObservation(
+        body.orbitKind === "moon" ? "Moon Orbit Locked" : "Circular Orbit Locked",
+        body.orbitKind === "moon"
+          ? "The moon completed enough of a curve around the planet. It is now correcting into a circular orbit."
+          : "The body completed enough of a curve around the main mass. It is now correcting into a circular orbit.",
+        260
+      );
+    }
+
+    if (body.lockedOrbit && !body.orbitAnnounced && body.angleHistory.length > 110) {
+      body.orbitAnnounced = true;
+
+      setObservation(
+        body.orbitKind === "moon" ? "Moon Orbit" : "Planet Orbit",
+        body.orbitKind === "moon"
+          ? "The moon is now visibly orbiting the nearby planet."
+          : "The planet is now visibly orbiting the biggest mass.",
+        220
+      );
     }
   });
+}
+
+
+
+function evaluateOrbitCandidate(body, target) {
+  const dx = target.x - body.x;
+  const dy = target.y - body.y;
+  const distance = Math.sqrt(dx * dx + dy * dy);
+
+  if (distance < target.radius * 1.7) {
+    return {
+      candidate: false,
+      steady: false,
+      averageDistance: distance
+    };
+  }
+
+  const vx = body.velocityX - target.velocityX;
+  const vy = body.velocityY - target.velocityY;
+  const speed = Math.sqrt(vx * vx + vy * vy);
+  const circularSpeed = getCircularOrbitSpeed(target, distance);
+
+  if (circularSpeed <= 0) {
+    return {
+      candidate: false,
+      steady: false,
+      averageDistance: distance
+    };
+  }
+
+  const speedRatio = speed / circularSpeed;
+  const radialSpeed = Math.abs((vx * dx + vy * dy) / Math.max(distance, 1));
+  const tangentSpeed = Math.sqrt(Math.max(0, speed * speed - radialSpeed * radialSpeed));
+
+  const candidate =
+    speedRatio > 0.5 &&
+    speedRatio < 1.95 &&
+    tangentSpeed > radialSpeed * 0.9;
+
+  if (!candidate || !body.recentDistances || body.recentDistances.length < 55) {
+    return {
+      candidate,
+      steady: false,
+      averageDistance: distance
+    };
+  }
+
+  const recent = body.recentDistances;
+  const averageDistance = recent.reduce((sum, value) => sum + value, 0) / recent.length;
+  const minDistance = Math.min(...recent);
+  const maxDistance = Math.max(...recent);
+  const distanceVariance = (maxDistance - minDistance) / Math.max(averageDistance, 1);
+  const angularTravel = getAngularTravel(body.angleHistory || []);
+
+  const steady =
+    candidate &&
+    distanceVariance < 0.34 &&
+    angularTravel > Math.PI * 0.8;
+
+  return {
+    candidate,
+    steady,
+    averageDistance
+  };
+}
+
+function getAngularTravel(angles) {
+  if (!angles || angles.length < 2) {
+    return 0;
+  }
+
+  let travel = 0;
+
+  for (let i = 1; i < angles.length; i++) {
+    travel += Math.abs(normalizeAngleDelta(angles[i] - angles[i - 1]));
+  }
+
+  return travel;
+}
+
+function normalizeAngleDelta(angle) {
+  while (angle > Math.PI) {
+    angle -= Math.PI * 2;
+  }
+
+  while (angle < -Math.PI) {
+    angle += Math.PI * 2;
+  }
+
+  return angle;
 }
 
 function handleCollisions() {
@@ -383,11 +729,13 @@ function handleCollisions() {
         const a = bodies[i];
         const b = bodies[j];
 
-        if (!areColliding(a, b)) continue;
+        if (!areColliding(a, b)) {
+          continue;
+        }
 
         const relativeSpeed = getRelativeSpeed(a, b);
 
-        if (relativeSpeed <= SLOW_MERGE_SPEED) {
+        if (shouldAccreteTinyImpact(a, b) || relativeSpeed <= SLOW_MERGE_SPEED) {
           mergeBodies(a, b);
         } else {
           shatterBodies(a, b, relativeSpeed);
@@ -397,9 +745,21 @@ function handleCollisions() {
         break;
       }
 
-      if (handled) break;
+      if (handled) {
+        break;
+      }
     }
   }
+}
+
+function shouldAccreteTinyImpact(a, b) {
+  const bigger = a.mass >= b.mass ? a : b;
+  const smaller = bigger === a ? b : a;
+
+  const massRatio = smaller.mass / bigger.mass;
+  const radiusRatio = smaller.radius / bigger.radius;
+
+  return massRatio <= TINY_IMPACT_MASS_RATIO || radiusRatio <= TINY_IMPACT_RADIUS_RATIO;
 }
 
 function updateDebris(delta) {
@@ -425,29 +785,37 @@ function getLaunchVelocity(body) {
 
   const sizeFactor = clamp(34 / body.radius, 0.28, 1.45);
 
-  return limitVelocity({
-    x: dx * LAUNCH_SCALE * sizeFactor,
-    y: dy * LAUNCH_SCALE * sizeFactor
-  }, MAX_SPEED);
+  return limitVelocity(
+    {
+      x: dx * LAUNCH_SCALE * sizeFactor,
+      y: dy * LAUNCH_SCALE * sizeFactor
+    },
+    MAX_SPEED
+  );
 }
 
-function getAssistedOrbitVelocity(body, userVelocity) {
-  const target = findBestOrbitTarget(body);
+function getReleaseAssistedVelocity(body, target, userVelocity) {
+  const userSpeed = Math.sqrt(userVelocity.x * userVelocity.x + userVelocity.y * userVelocity.y);
 
-  if (!target) {
-    return userVelocity;
+  if (userSpeed < 0.35) {
+    return getCircularizedVelocity(body, target, userVelocity, LOW_SPEED_RELEASE_ASSIST);
   }
 
+  return getCircularizedVelocity(body, target, userVelocity, RELEASE_ASSIST);
+}
+
+function getCircularizedVelocity(body, target, userVelocity, blendAmount) {
   const dx = target.x - body.x;
   const dy = target.y - body.y;
   const distance = Math.sqrt(dx * dx + dy * dy);
 
-  if (distance < target.radius * 1.7) {
+  if (distance < target.radius * 1.8) {
     return userVelocity;
   }
 
   const nx = dx / distance;
   const ny = dy / distance;
+
   let tx = -ny;
   let ty = nx;
 
@@ -458,91 +826,207 @@ function getAssistedOrbitVelocity(body, userVelocity) {
     ty = -ty;
   }
 
-  const circularSpeed = getCircularOrbitSpeed(target, distance) * 0.96;
+  const orbitDistance = body.lockedOrbit && body.orbitRadius
+    ? body.orbitRadius
+    : distance;
+
+  const circularSpeed = getCircularOrbitSpeed(target, orbitDistance);
+
   const circularVelocity = {
     x: tx * circularSpeed + target.velocityX,
     y: ty * circularSpeed + target.velocityY
   };
 
-  const blend = userSpeed < 0.1 ? 0.82 : ORBIT_ASSIST;
-
-  return limitVelocity({
-    x: lerp(userVelocity.x, circularVelocity.x, blend),
-    y: lerp(userVelocity.y, circularVelocity.y, blend)
-  }, MAX_SPEED);
+  return limitVelocity(
+    {
+      x: lerp(userVelocity.x, circularVelocity.x, blendAmount),
+      y: lerp(userVelocity.y, circularVelocity.y, blendAmount)
+    },
+    MAX_SPEED
+  );
 }
 
-function findBestOrbitTarget(body) {
-  let best = null;
-  let bestScore = -Infinity;
+function chooseOrbitParent(body) {
+  if (bodies.length === 0) {
+    return null;
+  }
 
-  bodies.forEach((target) => {
-    if (target === body || target.mass <= body.mass) return;
+  const mainMass = getMainMass();
+  const closestMoonParent = findClosestMoonParent(body, mainMass);
 
-    const dx = target.x - body.x;
-    const dy = target.y - body.y;
-    const distance = Math.sqrt(dx * dx + dy * dy);
+  if (closestMoonParent) {
+    return closestMoonParent;
+  }
 
-    if (distance < (target.radius + body.radius) * 1.05 || distance > 2600) {
+  if (mainMass && mainMass.mass > body.mass) {
+    return mainMass;
+  }
+
+  return null;
+}
+
+function findClosestMoonParent(body, mainMass) {
+  let closestParent = null;
+  let closestDistance = Infinity;
+
+  bodies.forEach((candidate) => {
+    if (candidate === body) {
       return;
     }
 
-    const score = target.mass * 2.8 - distance * 0.22;
+    if (candidate === mainMass) {
+      return;
+    }
 
-    if (score > bestScore) {
-      bestScore = score;
-      best = target;
+    if (candidate.mass <= body.mass) {
+      return;
+    }
+
+    if (candidate.orbitKind !== "planet" && !candidate.lockedOrbit) {
+      return;
+    }
+
+    const distanceToCandidate = getDistance(body, candidate);
+    const moonZone = Math.max(
+      candidate.radius * MOON_TARGET_DISTANCE_MULTIPLIER,
+      candidate.radius + body.radius + 170
+    );
+
+    if (distanceToCandidate > moonZone) {
+      return;
+    }
+
+    if (mainMass) {
+      const distanceToSun = getDistance(body, mainMass);
+
+      if (distanceToCandidate > distanceToSun) {
+        return;
+      }
+    }
+
+    if (distanceToCandidate < closestDistance) {
+      closestDistance = distanceToCandidate;
+      closestParent = candidate;
     }
   });
 
-  return best;
+  return closestParent;
 }
 
-function isLikelyOrbit(body, target) {
-  const dx = target.x - body.x;
-  const dy = target.y - body.y;
-  const distance = Math.sqrt(dx * dx + dy * dy);
+function reassignParentLocks() {
+  const mainMass = getMainMass();
 
-  if (distance < target.radius * 2.1) return false;
+  if (!mainMass) {
+    return;
+  }
 
-  const vx = body.velocityX - target.velocityX;
-  const vy = body.velocityY - target.velocityY;
-  const speed = Math.sqrt(vx * vx + vy * vy);
-  const circularSpeed = getCircularOrbitSpeed(target, distance);
+  bodies.forEach((body) => {
+    if (body === mainMass) {
+      body.orbitTarget = null;
+      body.lockedOrbit = false;
+      body.orbitKind = "sun";
+      body.orbitRadius = null;
+      return;
+    }
 
-  if (circularSpeed <= 0) return false;
+    if (body.orbitKind === "moon") {
+      const parent = getBodyById(body.orbitTarget);
 
-  const speedRatio = speed / circularSpeed;
-  const radialSpeed = Math.abs((vx * dx + vy * dy) / distance);
-  const tangentSpeed = Math.sqrt(Math.max(0, speed * speed - radialSpeed * radialSpeed));
+      if (parent && parent !== mainMass && parent.mass > body.mass) {
+        const distance = getDistance(body, parent);
+        const maxMoonDistance = parent.radius * MOON_LOCK_DISTANCE_MULTIPLIER;
 
-  return speedRatio > 0.55 && speedRatio < 1.58 && tangentSpeed > radialSpeed * 1.05;
+        if (distance <= maxMoonDistance) {
+          return;
+        }
+      }
+    }
+
+    if (mainMass.mass > body.mass && body.orbitKind !== "moon") {
+      if (body.orbitTarget !== mainMass.id) {
+        body.orbitScore = 0;
+        body.lockedOrbit = false;
+        body.orbitRadius = getDistance(body, mainMass);
+        body.trail = [];
+      }
+
+      body.orbitTarget = mainMass.id;
+      body.orbitKind = "planet";
+    }
+  });
+}
+
+function getCurrentOrbitTarget(body) {
+  if (!body.orbitTarget) {
+    return null;
+  }
+
+  const target = getBodyById(body.orbitTarget);
+
+  if (!target || target === body || target.mass <= body.mass) {
+    body.orbitTarget = null;
+    body.lockedOrbit = false;
+    body.orbitKind = "free";
+    body.orbitRadius = null;
+    return null;
+  }
+
+  return target;
 }
 
 function getCircularOrbitSpeed(target, distance) {
-  const tunedDistance = Math.max(distance, target.radius * 3.1);
-  return Math.sqrt((G * target.mass) / tunedDistance);
+  const safeDistance = Math.max(distance, target.radius * 3.1);
+  const targetGravity = target.gravity || 1;
+
+  return Math.sqrt((G * target.mass * targetGravity * safeDistance) / (safeDistance * safeDistance + SOFTENING));
+}
+
+function getMainMass() {
+  if (bodies.length === 0) {
+    return null;
+  }
+
+  return bodies.reduce((biggest, body) => {
+    return body.mass > biggest.mass ? body : biggest;
+  }, bodies[0]);
+}
+
+function isMainMass(body) {
+  return body === getMainMass();
 }
 
 function actsLikeSun(big, other) {
-  return big.mass > other.mass && other.mass < big.mass * SUN_ANCHOR_RATIO;
+  return big === getMainMass() && big.mass > other.mass;
 }
 
 function isDominantSun(body) {
-  return bodies.every((other) => other === body || other.mass < body.mass * SUN_ANCHOR_RATIO);
+  return body === getMainMass();
 }
 
 function areColliding(a, b) {
   const dx = b.x - a.x;
   const dy = b.y - a.y;
   const distance = Math.sqrt(dx * dx + dy * dy);
+
   return distance < (a.radius + b.radius) * COLLISION_DISTANCE;
 }
 
 function getRelativeSpeed(a, b) {
   const vx = b.velocityX - a.velocityX;
   const vy = b.velocityY - a.velocityY;
+
   return Math.sqrt(vx * vx + vy * vy);
+}
+
+function getBodyById(id) {
+  return bodies.find((body) => body.id === id) || null;
+}
+
+function getDistance(a, b) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+
+  return Math.sqrt(dx * dx + dy * dy);
 }
 
 function mergeBodies(a, b) {
@@ -552,12 +1036,13 @@ function mergeBodies(a, b) {
 
   const mergedX = (a.x * a.mass + b.x * b.mass) / totalMass;
   const mergedY = (a.y * a.mass + b.y * b.mass) / totalMass;
+
   let mergedVX = (a.velocityX * a.mass + b.velocityX * b.mass) / totalMass;
   let mergedVY = (a.velocityY * a.mass + b.velocityY * b.mass) / totalMass;
 
   if (actsLikeSun(dominant, weaker)) {
-    mergedVX *= 0.15;
-    mergedVY *= 0.15;
+    mergedVX *= 0.12;
+    mergedVY *= 0.12;
   }
 
   a.x = mergedX;
@@ -568,12 +1053,21 @@ function mergeBodies(a, b) {
   a.velocityY = mergedVY;
   a.color = dominant.color;
   a.trail = [];
-  a.facets = createFacets();
+  a.orbitScore = 0;
+  a.orbitTarget = null;
+  a.orbitAnnounced = false;
+  a.lockedOrbit = false;
+  a.orbitKind = "free";
+  a.orbitRadius = null;
+  a.recentDistances = [];
+  a.angleHistory = [];
+  a.texture = createSurfaceTexture(a.color);
 
   bodies = bodies.filter((body) => body !== b);
 
+  reassignParentLocks();
   createExplosion(mergedX, mergedY, dominant.color, 22, 0.9);
-  setObservation("Fusion", "Slow-moving masses collided and fused into a larger body.", 180);
+  setObservation("Fusion", "Masses collided and merged into a larger body.", 180);
 }
 
 function shatterBodies(a, b, speed) {
@@ -582,15 +1076,17 @@ function shatterBodies(a, b, speed) {
 
   createFragments(a, speed);
   createFragments(b, speed);
-  createExplosion(x, y, "#ffffff", 18, 1.2);
+  createExplosion(x, y, "#ffffff", 18, 1.25);
 
   bodies = bodies.filter((body) => body !== a && body !== b);
+
+  reassignParentLocks();
 
   if (debris.length > MAX_DEBRIS) {
     debris = debris.slice(debris.length - MAX_DEBRIS);
   }
 
-  setObservation("Collision", "Fast-moving masses collided and shattered into small pieces.", 200);
+  setObservation("Collision", "Fast-moving masses collided and shattered into small fragments.", 200);
 }
 
 function createFragments(body, impactSpeed) {
@@ -607,7 +1103,7 @@ function createFragments(body, impactSpeed) {
       velocityX: body.velocityX * 0.35 + Math.cos(angle) * speed,
       velocityY: body.velocityY * 0.35 + Math.sin(angle) * speed,
       radius: random(1.5, 4.8),
-      color: body.color,
+      color: shadeHex(body.color, random(-10, 22)),
       life: 1,
       decay: random(0.006, 0.016)
     });
@@ -638,6 +1134,7 @@ function clearSpace() {
   draftBody = null;
   pointerIsDown = false;
   pointerId = null;
+
   setObservation("Observations", "Press and hold anywhere to create mass. Drag before releasing to add velocity.", 0);
   updateHud();
   draw();
@@ -649,8 +1146,62 @@ function togglePause() {
   startLoop();
 }
 
+async function toggleFullscreen() {
+  const cssFullscreen = document.body.classList.contains("game-fullscreen");
+  const browserFullscreen = Boolean(document.fullscreenElement);
+  const shouldExit = cssFullscreen || browserFullscreen;
+
+  if (!shouldExit) {
+    document.body.classList.add("game-fullscreen");
+
+    if (fullscreenButton) {
+      fullscreenButton.textContent = "Exit Fullscreen";
+    }
+
+    try {
+      await document.documentElement.requestFullscreen();
+    } catch (error) {
+      // CSS fullscreen still works if browser fullscreen is blocked.
+    }
+  } else {
+    document.body.classList.remove("game-fullscreen");
+
+    if (fullscreenButton) {
+      fullscreenButton.textContent = "Fullscreen";
+    }
+
+    if (document.fullscreenElement) {
+      try {
+        await document.exitFullscreen();
+      } catch (error) {
+        // Safe fallback.
+      }
+    }
+  }
+
+  setTimeout(resizeCanvas, 80);
+  setTimeout(resizeCanvas, 240);
+}
+
+function syncFullscreenState() {
+  if (!fullscreenButton) {
+    return;
+  }
+
+  if (document.fullscreenElement) {
+    document.body.classList.add("game-fullscreen");
+    fullscreenButton.textContent = "Exit Fullscreen";
+  } else {
+    document.body.classList.remove("game-fullscreen");
+    fullscreenButton.textContent = "Fullscreen";
+  }
+
+  setTimeout(resizeCanvas, 80);
+}
+
 function draw() {
   const rect = labArea.getBoundingClientRect();
+
   ctx.clearRect(0, 0, rect.width, rect.height);
 
   drawGravityWells();
@@ -670,8 +1221,8 @@ function drawGravityWells() {
     const radius = clamp(body.radius * 5.2, 90, 480);
     const gradient = ctx.createRadialGradient(body.x, body.y, body.radius, body.x, body.y, radius);
 
-    gradient.addColorStop(0, hexToRgba(body.color, 0.16));
-    gradient.addColorStop(0.38, hexToRgba(body.color, 0.055));
+    gradient.addColorStop(0, hexToRgba(body.color, 0.14));
+    gradient.addColorStop(0.34, hexToRgba(body.color, 0.05));
     gradient.addColorStop(1, "rgba(0, 0, 0, 0)");
 
     ctx.fillStyle = gradient;
@@ -683,15 +1234,22 @@ function drawGravityWells() {
 
 function drawTrails() {
   bodies.forEach((body) => {
-    if (body.trail.length < 3) return;
+    if (body.trail.length < 3) {
+      return;
+    }
 
     ctx.beginPath();
+
     body.trail.forEach((point, index) => {
-      if (index === 0) ctx.moveTo(point.x, point.y);
-      else ctx.lineTo(point.x, point.y);
+      if (index === 0) {
+        ctx.moveTo(point.x, point.y);
+      } else {
+        ctx.lineTo(point.x, point.y);
+      }
     });
-    ctx.strokeStyle = hexToRgba(body.color, 0.42);
-    ctx.lineWidth = body.orbitScore > 60 ? 1.6 : 1;
+
+    ctx.strokeStyle = hexToRgba(body.color, body.lockedOrbit ? 0.58 : 0.34);
+    ctx.lineWidth = body.lockedOrbit ? 1.7 : 1;
     ctx.stroke();
   });
 }
@@ -704,77 +1262,136 @@ function drawDebris() {
     ctx.arc(piece.x, piece.y, piece.radius, 0, Math.PI * 2);
     ctx.fill();
   });
+
   ctx.globalAlpha = 1;
 }
 
 function drawBody(body) {
+  const shadowColor = hexToRgba(body.color, 0.7);
+
+  ctx.save();
+  ctx.shadowBlur = clamp(body.radius * 1.2, 16, 90);
+  ctx.shadowColor = shadowColor;
+  ctx.beginPath();
+  ctx.arc(body.x, body.y, body.radius, 0, Math.PI * 2);
+  ctx.fillStyle = createPlanetGradient(body);
+  ctx.fill();
+  ctx.restore();
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(body.x, body.y, body.radius, 0, Math.PI * 2);
+  ctx.clip();
+  drawPlanetBands(body);
+  drawPlanetSpots(body);
+  drawPlanetShadow(body);
+  ctx.restore();
+
+  drawPlanetRim(body);
+  drawMassLabel(body);
+}
+
+function createPlanetGradient(body) {
   const gradient = ctx.createRadialGradient(
-    body.x - body.radius * 0.35,
-    body.y - body.radius * 0.45,
-    body.radius * 0.1,
+    body.x - body.radius * 0.38,
+    body.y - body.radius * 0.46,
+    body.radius * 0.12,
     body.x,
     body.y,
     body.radius
   );
 
-  gradient.addColorStop(0, "rgba(255, 255, 255, 0.95)");
-  gradient.addColorStop(0.18, hexToRgba(body.color, 0.92));
-  gradient.addColorStop(1, shadeHex(body.color, -42));
+  gradient.addColorStop(0, "rgba(255, 255, 255, 0.96)");
+  gradient.addColorStop(0.14, shadeHex(body.color, 26));
+  gradient.addColorStop(0.62, body.color);
+  gradient.addColorStop(1, shadeHex(body.color, -36));
 
-  ctx.save();
-  ctx.shadowBlur = clamp(body.radius * 0.9, 14, 90);
-  ctx.shadowColor = body.color;
-  ctx.fillStyle = gradient;
-  ctx.beginPath();
-  ctx.arc(body.x, body.y, body.radius, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
-
-  drawLowPolyFacets(body);
-  drawMassLabel(body);
+  return gradient;
 }
 
-function drawLowPolyFacets(body) {
-  const rgb = hexToRgb(body.color);
+function drawPlanetBands(body) {
+  body.texture.bands.forEach((band) => {
+    const width = body.radius * (0.22 + band.width);
+    const yOffset = body.radius * band.offset;
 
-  body.facets.forEach((facet) => {
-    const x1 = body.x + Math.cos(facet.start) * body.radius * facet.inner;
-    const y1 = body.y + Math.sin(facet.start) * body.radius * facet.inner;
-    const x2 = body.x + Math.cos(facet.start) * body.radius * facet.outer;
-    const y2 = body.y + Math.sin(facet.start) * body.radius * facet.outer;
-    const x3 = body.x + Math.cos(facet.end) * body.radius * facet.outer;
-    const y3 = body.y + Math.sin(facet.end) * body.radius * facet.outer;
-
-    ctx.fillStyle = facet.light
-      ? `rgba(255, 255, 255, ${facet.alpha})`
-      : `rgba(${rgb.r * 0.35}, ${rgb.g * 0.35}, ${rgb.b * 0.35}, ${facet.alpha + 0.06})`;
-
+    ctx.save();
+    ctx.translate(body.x, body.y + yOffset);
+    ctx.rotate(band.tilt * 0.2);
+    ctx.scale(1, 0.42);
+    ctx.fillStyle = hexToRgba(band.color, band.alpha);
     ctx.beginPath();
-    ctx.moveTo(x1, y1);
-    ctx.lineTo(x2, y2);
-    ctx.lineTo(x3, y3);
-    ctx.closePath();
+    ctx.ellipse(0, 0, body.radius * 1.06, width, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  });
+}
+
+function drawPlanetSpots(body) {
+  body.texture.spots.forEach((spot) => {
+    const px = body.x + Math.cos(spot.angle) * body.radius * spot.distance;
+    const py = body.y + Math.sin(spot.angle) * body.radius * spot.distance;
+
+    ctx.fillStyle = hexToRgba(spot.color, spot.alpha);
+    ctx.beginPath();
+    ctx.arc(px, py, body.radius * spot.radius, 0, Math.PI * 2);
     ctx.fill();
   });
 }
 
+function drawPlanetShadow(body) {
+  const shade = ctx.createLinearGradient(
+    body.x - body.radius,
+    body.y - body.radius,
+    body.x + body.radius,
+    body.y + body.radius
+  );
+
+  shade.addColorStop(0, "rgba(255, 255, 255, 0.04)");
+  shade.addColorStop(0.48, "rgba(0, 0, 0, 0)");
+  shade.addColorStop(1, "rgba(0, 0, 0, 0.28)");
+
+  ctx.fillStyle = shade;
+  ctx.beginPath();
+  ctx.arc(body.x, body.y, body.radius, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawPlanetRim(body) {
+  ctx.save();
+
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.18)";
+  ctx.lineWidth = Math.max(1, body.radius * 0.045);
+  ctx.beginPath();
+  ctx.arc(body.x, body.y, body.radius - ctx.lineWidth * 0.5, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.fillStyle = "rgba(255, 255, 255, 0.22)";
+  ctx.beginPath();
+  ctx.arc(body.x - body.radius * 0.35, body.y - body.radius * 0.38, body.radius * 0.18, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
 function drawMassLabel(body) {
   const label = `Mass ${Math.round(body.mass)}`;
+
   ctx.font = "800 11px Arial";
+
   const textWidth = ctx.measureText(label).width;
   const width = textWidth + 18;
   const height = 22;
   const x = body.x - width / 2;
   const y = body.y - body.radius - 30;
 
-  ctx.fillStyle = "rgba(0, 0, 0, 0.72)";
+  ctx.fillStyle = "rgba(0, 0, 0, 0.74)";
   roundRect(x, y, width, height, 999);
   ctx.fill();
 
   ctx.strokeStyle = "rgba(255, 255, 255, 0.16)";
   ctx.stroke();
 
-  ctx.fillStyle = "rgba(255, 255, 255, 0.78)";
+  ctx.fillStyle = "rgba(255, 255, 255, 0.82)";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillText(label, body.x, y + height / 2 + 0.5);
@@ -785,7 +1402,9 @@ function drawAimLine(body) {
   const dy = body.aimY - body.startY;
   const distance = Math.sqrt(dx * dx + dy * dy);
 
-  if (distance < 8) return;
+  if (distance < 8) {
+    return;
+  }
 
   ctx.strokeStyle = "rgba(255, 255, 255, 0.34)";
   ctx.lineWidth = 1;
@@ -797,6 +1416,7 @@ function drawAimLine(body) {
 
 function roundRect(x, y, width, height, radius) {
   const r = Math.min(radius, width / 2, height / 2);
+
   ctx.beginPath();
   ctx.moveTo(x + r, y);
   ctx.lineTo(x + width - r, y);
@@ -812,6 +1432,7 @@ function roundRect(x, y, width, height, radius) {
 
 function limitBodySpeed(body) {
   const limited = limitVelocity({ x: body.velocityX, y: body.velocityY }, MAX_SPEED);
+
   body.velocityX = limited.x;
   body.velocityY = limited.y;
 }
@@ -819,7 +1440,9 @@ function limitBodySpeed(body) {
 function limitVelocity(velocity, maxSpeed) {
   const speed = Math.sqrt(velocity.x * velocity.x + velocity.y * velocity.y);
 
-  if (speed <= maxSpeed) return velocity;
+  if (speed <= maxSpeed) {
+    return velocity;
+  }
 
   return {
     x: (velocity.x / speed) * maxSpeed,
@@ -840,7 +1463,26 @@ function random(min, max) {
 }
 
 function hexToRgb(hex) {
+  if (!hex || typeof hex !== "string") {
+    return { r: 255, g: 255, b: 255 };
+  }
+
+  if (hex.startsWith("rgb")) {
+    const numbers = hex.match(/\d+/g);
+
+    if (!numbers || numbers.length < 3) {
+      return { r: 255, g: 255, b: 255 };
+    }
+
+    return {
+      r: Number(numbers[0]),
+      g: Number(numbers[1]),
+      b: Number(numbers[2])
+    };
+  }
+
   const clean = hex.replace("#", "");
+
   return {
     r: parseInt(clean.substring(0, 2), 16),
     g: parseInt(clean.substring(2, 4), 16),
@@ -850,17 +1492,47 @@ function hexToRgb(hex) {
 
 function hexToRgba(hex, alpha) {
   const rgb = hexToRgb(hex);
+
   return `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${alpha})`;
 }
 
 function shadeHex(hex, percent) {
+  if (!hex || typeof hex !== "string" || !hex.startsWith("#")) {
+    return hex;
+  }
+
   const rgb = hexToRgb(hex);
   const amount = Math.round(2.55 * percent);
+
   const r = clamp(rgb.r + amount, 0, 255);
   const g = clamp(rgb.g + amount, 0, 255);
   const b = clamp(rgb.b + amount, 0, 255);
 
-  return `rgb(${r}, ${g}, ${b})`;
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
+function toHex(value) {
+  return Math.round(value).toString(16).padStart(2, "0");
+}
+
+function stopControlClicks(event) {
+  event.stopPropagation();
+}
+
+function getGravityForBody(body) {
+  if (body.radius >= 85) {
+    return 1.35; // huge sun-like body
+  }
+
+  if (body.radius >= 45) {
+    return 1.1; // medium planet
+  }
+
+  if (body.radius <= 18) {
+    return 0.85; // tiny moon
+  }
+
+  return 1;
 }
 
 labArea.addEventListener("pointerdown", startDraft);
@@ -869,8 +1541,19 @@ window.addEventListener("pointerup", releaseDraft);
 window.addEventListener("pointercancel", cancelDraft);
 window.addEventListener("blur", cancelDraft);
 
+document.querySelectorAll(".lab-controls button").forEach((button) => {
+  button.addEventListener("pointerdown", stopControlClicks);
+  button.addEventListener("click", stopControlClicks);
+});
+
 clearButton.addEventListener("click", clearSpace);
 pauseButton.addEventListener("click", togglePause);
+
+if (fullscreenButton) {
+  fullscreenButton.addEventListener("click", toggleFullscreen);
+}
+
+document.addEventListener("fullscreenchange", syncFullscreenState);
 window.addEventListener("resize", resizeCanvas);
 
 resizeCanvas();
