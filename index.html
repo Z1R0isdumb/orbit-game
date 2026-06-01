@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mass Orbit Lab</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Gravity experiment</p>
+          <h1>Mass Orbit Lab</h1>
+          <p class="tagline">Hold to create mass. Drag and release to launch it into orbit.</p>
+        </div>
+
+        <div class="top-actions">
+          <button id="clearButton" type="button">Clear Space</button>
+          <button id="pauseButton" type="button">Pause</button>
+        </div>
+      </header>
+
+      <section id="labArea" class="lab-area" aria-label="Mass Orbit Lab play area">
+        <canvas id="spaceCanvas"></canvas>
+
+        <aside class="observations" aria-live="polite">
+          <h2 id="observationTitle">Observations</h2>
+          <p id="observationText">Press and hold anywhere to create mass. Drag before releasing to add velocity.</p>
+        </aside>
+
+        <div class="hud" aria-label="Simulation stats">
+          <span>Bodies <strong id="bodyCount">0</strong></span>
+          <span>Total Mass <strong id="massTotal">0</strong></span>
+          <span>Debris <strong id="debrisCount">0</strong></span>
+        </div>
+
+        <div class="help-strip">
+          <span>Hold = grow</span>
+          <span>Drag = velocity</span>
+          <span>Slow collision = merge</span>
+          <span>Fast collision = shatter</span>
+        </div>
+      </section>
+    </main>
+
+    <script src="script.js"></script>
+  </body>
+</html>
