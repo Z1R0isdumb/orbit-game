@@ -41,6 +41,7 @@ const BLACK_HOLE_GRAVITY = 16;
 const BLACK_HOLE_RADIUS_MULTIPLIER = 3.2;
 const BLACK_HOLE_DRAG = 0.018;
 const BLACK_HOLE_INWARD_PULL = 0.0001;
+const BLACK_HOLE_MAX_SPEED = 0.2;
 const MOON_MASS_RATIO = 0.1;
 
 const ORBIT_FOLLOW_STRENGTH = 0.075;
@@ -92,6 +93,9 @@ let configPanel = null;
 let hideTrails = false;
 let isMuted = false;
 let hideAllUi = false;
+
+let lastMassPanelSignature = "";
+let lastMassPanelBodyIds = "";
 
 const SOUND_VOLUME = 0.65;
 const LOOP_VOLUME = 0.18;
@@ -932,13 +936,9 @@ function getGravityFieldStrength(sourceBody, distance) {
 
 function moveBodies(delta) {
   bodies.forEach((body) => {
-    if (body.isBlackHole) {
-      body.velocityX = 0;
-      body.velocityY = 0;
-      return;
-    }
+    const speedLimit = body.isBlackHole ? BLACK_HOLE_MAX_SPEED : MAX_SPEED;
 
-    limitBodySpeed(body);
+    limitBodySpeed(body, speedLimit);
 
     body.x += body.velocityX * delta;
     body.y += body.velocityY * delta;
@@ -1423,6 +1423,8 @@ function clearSpace() {
   stopSpaceLoopSound();
 
   bodies = [];
+  lastMassPanelSignature = "";
+  lastMassPanelBodyIds = "";
   debris = [];
   draftBody = null;
   pointerIsDown = false;
@@ -1633,10 +1635,49 @@ function drawBody(body) {
   }
 }
 
+function drawBlackHoleDistortion(body) {
+  const time = performance.now() * 0.001;
+  const ringCount = 5;
+
+  ctx.save();
+
+  for (let i = 0; i < ringCount; i++) {
+    const radius = body.radius * (1.55 + i * 0.55);
+    const wobble = Math.sin(time * 2.2 + i) * body.radius * 0.08;
+    const alpha = 0.18 - i * 0.025;
+
+    ctx.strokeStyle = `rgba(185, 160, 255, ${alpha})`;
+    ctx.lineWidth = Math.max(1, body.radius * 0.025);
+
+    ctx.beginPath();
+
+    for (let a = 0; a <= Math.PI * 2 + 0.08; a += 0.08) {
+      const wave = Math.sin(a * 5 + time * 3 + i) * wobble;
+      const x = body.x + Math.cos(a) * (radius + wave);
+      const y = body.y + Math.sin(a) * (radius - wave * 0.6);
+
+      if (a === 0) {
+        ctx.moveTo(x, y);
+      } else {
+        ctx.lineTo(x, y);
+      }
+    }
+
+    ctx.closePath();
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+
+
 function drawBlackHole(body) {
   const pullRadius = clamp(body.radius * 3.2, 40, 220);
 
   ctx.save();
+
+  drawBlackHoleDistortion(body);
 
   const halo = ctx.createRadialGradient(body.x, body.y, body.radius * 0.5, body.x, body.y, pullRadius);
   halo.addColorStop(0, "rgba(255, 255, 255, 0.55)");
@@ -1805,8 +1846,8 @@ function roundRect(x, y, width, height, radius) {
   ctx.closePath();
 }
 
-function limitBodySpeed(body) {
-  const limited = limitVelocity({ x: body.velocityX, y: body.velocityY }, MAX_SPEED);
+function limitBodySpeed(body, maxSpeed = MAX_SPEED) {
+  const limited = limitVelocity({ x: body.velocityX, y: body.velocityY }, maxSpeed);
 
   body.velocityX = limited.x;
   body.velocityY = limited.y;
@@ -1848,6 +1889,11 @@ function getMassForRadius(radius) {
 function getRadiusForMass(mass) {
   return Math.sqrt(Math.max(0, mass) + MIN_RADIUS * MIN_RADIUS);
 }
+
+function getBlackHoleRadiusForMass(mass) {
+  return Math.sqrt(Math.max(0, mass) + MIN_RADIUS * MIN_RADIUS) * 1.05;
+}
+
 
 function hexToRgb(hex) {
   if (!hex || typeof hex !== "string") {
@@ -1927,6 +1973,9 @@ function createMassPanel() {
   massPanel.addEventListener("pointerdown", stopPanelInteraction, true);
   massPanel.addEventListener("pointerup", handleMassPanelAction, true);
   massPanel.addEventListener("click", stopPanelInteraction, true);
+  massPanel.addEventListener("input", handleMassInput);
+  massPanel.addEventListener("change", handleMassInput);
+  massPanel.addEventListener("keydown", handleMassInputKeydown);
 }
 
 function injectMassPanelStyles() {
@@ -2055,6 +2104,30 @@ function injectMassPanelStyles() {
       font-size: 0.7rem;
       font-weight: 800;
     }
+    .mass-input {
+    width: 74px;
+    min-width: 0;
+    padding: 5px 7px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    background: rgba(0, 0, 0, 0.48);
+    color: rgba(255, 255, 255, 0.9);
+    font-size: 0.72rem;
+    font-weight: 900;
+    text-align: right;
+    outline: none;
+}
+
+.mass-input:focus {
+  border-color: rgba(66, 245, 215, 0.75);
+  box-shadow: 0 0 0 3px rgba(66, 245, 215, 0.12);
+}
+
+.mass-input::-webkit-outer-spin-button,
+.mass-input::-webkit-inner-spin-button {
+  margin: 0;
+}
+
 
     .mass-actions {
       display: grid;
@@ -2107,6 +2180,39 @@ function updateMassPanel() {
     return;
   }
 
+  const activeInput = document.activeElement && document.activeElement.classList.contains("mass-input")
+    ? document.activeElement
+    : null;
+
+  const bodyIds = bodies.map((body) => body.id).join("|");
+
+  // If the row being edited was destroyed/absorbed, blur it and force refresh.
+  if (activeInput) {
+    const editedBodyStillExists = bodies.some((body) => body.id === activeInput.dataset.id);
+
+    if (!editedBodyStillExists) {
+      activeInput.blur();
+    }
+  }
+
+  const isEditingExistingMass = document.activeElement && document.activeElement.classList.contains("mass-input");
+
+  // While editing, only pause refresh if the actual body list did not change.
+  if (isEditingExistingMass && bodyIds === lastMassPanelBodyIds) {
+    return;
+  }
+
+  const signature = bodies.map((body) => {
+    return `${body.id}:${Math.round(body.mass)}:${Math.round(body.radius)}:${Math.round(body.gravityRadius)}:${body.isBlackHole}`;
+  }).join("|");
+
+  if (signature === lastMassPanelSignature && bodyIds === lastMassPanelBodyIds) {
+    return;
+  }
+
+  lastMassPanelSignature = signature;
+  lastMassPanelBodyIds = bodyIds;
+
   if (bodies.length === 0) {
     massPanelList.innerHTML = `<div class="mass-empty">No masses yet. Hold and drag in space to create the first one.</div>`;
     return;
@@ -2124,7 +2230,15 @@ function updateMassPanel() {
         <div class="mass-row-top">
           <span class="mass-dot" style="color:${color}"></span>
           <span>${name}</span>
-          <span class="mass-meta">${Math.round(body.mass)}</span>
+          <input
+            class="mass-input"
+            type="number"
+            min="0"
+            step="1"
+            data-id="${body.id}"
+            value="${Math.round(body.mass)}"
+            title="Edit mass"
+          >
         </div>
         <div class="mass-meta">radius ${Math.round(body.radius)} · gravity range ${Math.round(body.gravityRadius)} · speed ${speed.toFixed(1)}</div>
         <div class="mass-actions">
@@ -2137,12 +2251,23 @@ function updateMassPanel() {
   }).join("");
 }
 
+function forceMassPanelRefresh() {
+  if (document.activeElement && document.activeElement.classList.contains("mass-input")) {
+    document.activeElement.blur();
+  }
+
+  lastMassPanelSignature = "";
+  lastMassPanelBodyIds = "";
+  updateHud();
+  draw();
+}
+
+
 function stopPanelInteraction(event) {
   event.stopPropagation();
 }
 
 function handleMassPanelAction(event) {
-  event.preventDefault();
   event.stopPropagation();
 
   const button = event.target.closest("button[data-action]");
@@ -2150,6 +2275,8 @@ function handleMassPanelAction(event) {
   if (!button || button.disabled) {
     return;
   }
+
+  event.preventDefault();
 
   const body = bodies.find((item) => item.id === button.dataset.id);
 
@@ -2171,9 +2298,96 @@ function handleMassPanelAction(event) {
     turnIntoBlackHole(body);
   }
 
+  lastMassPanelSignature = "";
   updateHud();
   draw();
   startLoop();
+}
+
+function handleMassInput(event) {
+  const input = event.target.closest(".mass-input");
+
+  if (!input) {
+    return;
+  }
+
+  event.stopPropagation();
+
+  const body = bodies.find((item) => item.id === input.dataset.id);
+
+  if (!body) {
+    return;
+  }
+
+  const newMass = Number(input.value);
+
+  if (!Number.isFinite(newMass) || newMass < 0) {
+    return;
+  }
+
+  setBodyMass(body, newMass);
+  draw();
+}
+
+function handleMassInputKeydown(event) {
+  const input = event.target.closest(".mass-input");
+
+  if (!input) {
+    return;
+  }
+
+  event.stopPropagation();
+
+  if (event.key === "Enter") {
+    input.blur();
+    lastMassPanelSignature = "";
+    updateHud();
+    draw();
+  }
+}
+
+function setBodyMass(body, newMass) {
+  body.mass = Math.max(0, newMass);
+
+  if (body.isBlackHole) {
+    body.radius = clamp(
+      getBlackHoleRadiusForMass(body.mass),
+      MIN_RADIUS + 10,
+      MAX_RADIUS * 1.8
+    );
+  } else {
+    body.radius = getRadiusForMass(body.mass);
+  }
+
+  body.gravity = getGravityForBody(body);
+  body.gravityRadius = getGravityRadiusForBody(body);
+
+  if (body.isBlackHole) {
+    const limitedVelocity = limitVelocity(
+      { x: body.velocityX, y: body.velocityY },
+      BLACK_HOLE_MAX_SPEED
+    );
+
+    body.velocityX = limitedVelocity.x;
+    body.velocityY = limitedVelocity.y;
+  }
+
+  body.trail = [];
+  body.recentDistances = [];
+  body.angleHistory = [];
+  body.orbitScore = 0;
+
+  bodies.forEach((otherBody) => {
+    if (otherBody.orbitTarget === body.id) {
+      otherBody.lockedOrbit = false;
+      otherBody.orbitRadius = null;
+      otherBody.recentDistances = [];
+      otherBody.angleHistory = [];
+      otherBody.orbitScore = 0;
+    }
+  });
+
+  lastMassPanelSignature = "";
 }
 
 function addMoonToBody(parent) {
@@ -2234,15 +2448,35 @@ function addMoonToBody(parent) {
 function destroyBody(body) {
   playSound("planetChange");
   createExplosion(body.x, body.y, body.isBlackHole ? "#b9a0ff" : body.color, 34, 1.25);
+
   bodies = bodies.filter((item) => item !== body);
-  setObservation("Mass Destroyed", "The selected mass was removed. Other bodies keep their current inertia.", 160);
+
+  bodies.forEach((otherBody) => {
+    if (otherBody.orbitTarget === body.id) {
+      otherBody.lockedOrbit = false;
+      otherBody.orbitTarget = null;
+      otherBody.orbitRadius = null;
+      otherBody.orbitKind = "free";
+      otherBody.recentDistances = [];
+      otherBody.angleHistory = [];
+      otherBody.orbitScore = 0;
+    }
+  });
+
+  setObservation("Mass Destroyed", "The selected mass was removed.", 160);
+  forceMassPanelRefresh();
 }
 
 function turnIntoBlackHole(body) {
   body.isBlackHole = true;
   body.color = "#020204";
-  body.velocityX = 0;
-  body.velocityY = 0;
+  const limitedVelocity = limitVelocity(
+  { x: body.velocityX, y: body.velocityY },
+  BLACK_HOLE_MAX_SPEED
+);
+
+  body.velocityX = limitedVelocity.x;
+  body.velocityY = limitedVelocity.y;
   body.gravity = getGravityForBody(body);
   body.gravityRadius = getGravityRadiusForBody(body);
   body.trail = [];
@@ -2257,21 +2491,55 @@ function turnIntoBlackHole(body) {
 }
 
 function absorbIntoBlackHole(blackHole, otherBody) {
+  const oldMass = blackHole.mass;
   const totalMass = blackHole.mass + otherBody.mass;
 
+  const absorbedVelocity = limitVelocity(
+    {
+      x: (blackHole.velocityX * blackHole.mass + otherBody.velocityX * otherBody.mass) / Math.max(totalMass, 1),
+      y: (blackHole.velocityY * blackHole.mass + otherBody.velocityY * otherBody.mass) / Math.max(totalMass, 1)
+    },
+    BLACK_HOLE_MAX_SPEED
+  );
+
   blackHole.mass = totalMass;
-  blackHole.radius = clamp(getRadiusForMass(totalMass) * 0.7, MIN_RADIUS + 8, MAX_RADIUS * 1.35);
+
+  blackHole.radius = clamp(
+    getBlackHoleRadiusForMass(totalMass),
+    MIN_RADIUS + 10,
+    MAX_RADIUS * 1.8
+  );
+
   blackHole.gravity = getGravityForBody(blackHole);
   blackHole.gravityRadius = getGravityRadiusForBody(blackHole);
-  blackHole.velocityX = 0;
-  blackHole.velocityY = 0;
+  blackHole.velocityX = absorbedVelocity.x;
+  blackHole.velocityY = absorbedVelocity.y;
   blackHole.trail = [];
 
   bodies = bodies.filter((body) => body !== otherBody);
 
+  bodies.forEach((body) => {
+    if (body.orbitTarget === otherBody.id) {
+      body.lockedOrbit = false;
+      body.orbitTarget = null;
+      body.orbitRadius = null;
+      body.orbitKind = "free";
+      body.recentDistances = [];
+      body.angleHistory = [];
+      body.orbitScore = 0;
+    }
+  });
+
   playSound("planetMerge");
-  createExplosion(blackHole.x, blackHole.y, "#b9a0ff", 18, 0.85);
-  setObservation("Absorbed", "The black hole absorbed a mass and stayed fixed in place.", 160);
+  createExplosion(blackHole.x, blackHole.y, "#b9a0ff", 24, 0.95);
+
+  setObservation(
+    "Absorbed",
+    `The black hole consumed ${Math.round(totalMass - oldMass)} mass.`,
+    160
+  );
+
+  forceMassPanelRefresh();
 }
 
 function createConfigPanel() {
