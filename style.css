@@ -359,3 +359,8 @@ body.game-fullscreen .lab-controls {
     padding: 11px 8px;
   }
 }
+
+.lab-area.panning {
+  cursor: grabbing;
+}
+

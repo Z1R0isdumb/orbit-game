@@ -7,45 +7,63 @@ const fullscreenButton = document.getElementById("fullscreenButton");
 const bodyCount = document.getElementById("bodyCount");
 const massTotal = document.getElementById("massTotal");
 const debrisCount = document.getElementById("debrisCount");
+const debrisStat = debrisCount ? debrisCount.closest(".stat, .hud-stat, .counter, div") : null;
+
+if (debrisStat) {
+  debrisStat.style.display = "none";
+}
+
 const observationTitle = document.getElementById("observationTitle");
 const observationText = document.getElementById("observationText");
 
 const COLORS = ["#f7c948", "#42f5d7", "#7c3cff", "#ff4f8b", "#7cff6b", "#f97316", "#60a5fa"];
 
-const G = 0.58;
-const SOFTENING = 760;
+const G = 1.75;
+const SOFTENING = 420;
 const MIN_RADIUS = 3;
 const MAX_RADIUS = 110;
 const GROWTH_RATE = 0.015;
-const LAUNCH_SCALE = 0.038;
-const MAX_SPEED = 24;
+const LAUNCH_SCALE = 0.034;
+const MAX_SPEED = 38;
+const PHYSICS_STEP = 0.34;
 
-const RELEASE_ASSIST = 0.34;
-const LOW_SPEED_RELEASE_ASSIST = 0.56;
+const GRAVITY_RADIUS_MULTIPLIER = 10;
+const MIN_GRAVITY_RADIUS = 35;
+const MAX_GRAVITY_RADIUS = 700;
+const GRAVITY_EDGE_FADE_START = 1;
 
-const CANDIDATE_ORBIT_CORRECTION = 0.011;
-const LOCKED_ORBIT_CORRECTION = 0.06;
-const MOON_LOCK_CORRECTION = 0.095;
-const LOCKED_RADIUS_CORRECTION = 0.024;
-const MOON_RADIUS_CORRECTION = 0.048;
+const GRAVITY_CAPTURE_STRENGTH = 0.018;
+const GRAVITY_CAPTURE_MIN_TANGENT = 0.18;
+const GRAVITY_CAPTURE_MAX_DISTANCE_RATIO = 0.96;
+
+const MIN_REACTION_MASS_RATIO = 0.6;
+const BLACK_HOLE_GRAVITY = 16;
+const BLACK_HOLE_RADIUS_MULTIPLIER = 3.2;
+const BLACK_HOLE_DRAG = 0.018;
+const BLACK_HOLE_INWARD_PULL = 0.0001;
+const MOON_MASS_RATIO = 0.1;
+
+const ORBIT_FOLLOW_STRENGTH = 0.075;
+const ORBIT_RADIUS_STRENGTH = 0.035;
+const MOON_FOLLOW_STRENGTH = 0.13;
+const MOON_RADIUS_STRENGTH = 1.07;
+
+
+const MIN_VIEW_ZOOM = 0.22;
+const MAX_VIEW_ZOOM = 3.2;
+const ZOOM_STEP = 1.12;
 
 const COLLISION_DISTANCE = 0.9;
 const SLOW_MERGE_SPEED = 2.8;
-const MAX_TRAIL_POINTS = 620;
+const MAX_TRAIL_POINTS = 1200;
 const MAX_DEBRIS = 420;
 
-const ORBIT_SAMPLE_LIMIT = 180;
-const ORBIT_CONFIRM_SCORE = 64;
-const PHYSICS_STEP = 0.5;
+const ORBIT_SAMPLE_LIMIT = 220;
+const ORBIT_CONFIRM_SCORE = 74;
+const ORBIT_VARIANCE_LIMIT = 0.52;
 
 const TINY_IMPACT_MASS_RATIO = 0.08;
 const TINY_IMPACT_RADIUS_RATIO = 0.34;
-
-const THIRD_BODY_DAMPING = 0.008;
-const SMALL_BODY_INTERACTION = 0;
-
-const MOON_TARGET_DISTANCE_MULTIPLIER = 28;
-const MOON_LOCK_DISTANCE_MULTIPLIER = 38;
 
 let bodies = [];
 let debris = [];
@@ -56,6 +74,19 @@ let animationId = null;
 let isPaused = false;
 let lastTime = 0;
 let observationCooldown = 0;
+let cameraX = 0;
+let cameraY = 0;
+let cameraZoom = 1;
+
+let isCameraDragging = false;
+let cameraDragPointerId = null;
+let cameraDragStartX = 0;
+let cameraDragStartY = 0;
+let cameraStartX = 0;
+let cameraStartY = 0;
+
+let massPanel = null;
+let massPanelList = null;
 
 const SOUND_VOLUME = 0.65;
 const LOOP_VOLUME = 0.18;
@@ -313,11 +344,31 @@ function resizeCanvas() {
 }
 
 function getPointerPosition(event) {
+  const screenPoint = getScreenPointerPosition(event);
+
+  return screenToWorld(screenPoint.x, screenPoint.y);
+}
+
+function getScreenPointerPosition(event) {
   const rect = labArea.getBoundingClientRect();
 
   return {
     x: event.clientX - rect.left,
     y: event.clientY - rect.top
+  };
+}
+
+function screenToWorld(screenX, screenY) {
+  return {
+    x: cameraX + screenX / cameraZoom,
+    y: cameraY + screenY / cameraZoom
+  };
+}
+
+function worldToScreen(worldX, worldY) {
+  return {
+    x: (worldX - cameraX) * cameraZoom,
+    y: (worldY - cameraY) * cameraZoom
   };
 }
 
@@ -336,11 +387,19 @@ function updateHud() {
 
   bodyCount.textContent = bodies.length;
   massTotal.textContent = Math.round(totalMass);
+  if (debrisCount) {
   debrisCount.textContent = debris.length;
+}
+  updateMassPanel();
 }
 
 function startDraft(event) {
-  if (event.target.closest(".lab-controls")) {
+  if (event.target.closest(".lab-controls") || event.target.closest(".mass-panel")) {
+    return;
+  }
+
+  if (isCameraDragGesture(event)) {
+    startCameraDrag(event);
     return;
   }
 
@@ -379,7 +438,6 @@ function startDraft(event) {
   setObservation("Observations", "Mass is forming. Hold longer to create a heavier body.", 0);
   startGrowSound();
 
-  
   try {
     labArea.setPointerCapture(event.pointerId);
   } catch (error) {
@@ -405,10 +463,6 @@ function aimDraft(event) {
   draftBody.aimY = point.y;
 }
 
-
-
-
-
 function releaseDraft(event) {
   if (!draftBody) {
     return;
@@ -420,55 +474,38 @@ function releaseDraft(event) {
 
   updateDraftBody();
   stopGrowSound();
-playSound("planetAdd");
+  playSound("planetAdd");
 
-draftBody.gravity = getGravityForBody(draftBody);
+  draftBody.gravity = getGravityForBody(draftBody);
+  draftBody.gravityRadius = getGravityRadiusForBody(draftBody);
 
   const userVelocity = getLaunchVelocity(draftBody);
-  const parent = chooseOrbitParent(draftBody);
-  const assistedVelocity = parent
-    ? getReleaseAssistedVelocity(draftBody, parent, userVelocity)
-    : userVelocity;
 
-  draftBody.velocityX = assistedVelocity.x;
-  draftBody.velocityY = assistedVelocity.y;
+  draftBody.velocityX = userVelocity.x;
+  draftBody.velocityY = userVelocity.y;
   draftBody.isDraft = false;
   draftBody.trail = [];
   draftBody.recentDistances = [];
   draftBody.angleHistory = [];
   draftBody.orbitScore = 0;
-  draftBody.orbitTarget = parent ? parent.id : null;
+  draftBody.orbitTarget = null;
   draftBody.orbitAnnounced = false;
   draftBody.lockedOrbit = false;
-  draftBody.orbitRadius = parent ? getDistance(draftBody, parent) : null;
-  draftBody.orbitKind = parent && !isMainMass(parent) ? "moon" : parent ? "planet" : "free";
+  draftBody.orbitKind = "free";
 
   const wasFirstBody = bodies.length === 0;
 
-bodies.push(draftBody);
+  bodies.push(draftBody);
 
-if (wasFirstBody) {
-  startSpaceLoopSound();
-}
-  reassignParentLocks();
-
-  if (parent) {
-    const isMoon = draftBody.orbitKind === "moon";
-
-    setObservation(
-      isMoon ? "Moon Path" : "Planet Path",
-      isMoon
-        ? "The small body is near a planet. If it curves around that planet, it will lock into a moon orbit."
-        : "The body is moving around the biggest mass. If it curves enough, it will lock into a circular orbit.",
-      180
-    );
-  } else if (bodies.length === 1) {
-    setObservation(
-      "Observations",
-      "Create another mass nearby and drag sideways to try forming an orbit.",
-      150
-    );
+  if (wasFirstBody) {
+    startSpaceLoopSound();
   }
+
+  setObservation(
+    "Mass Added",
+    "Every body now has its own gravity radius. Objects keep their inertia and can be pulled by any nearby mass.",
+    150
+  );
 
   draftBody = null;
   pointerIsDown = false;
@@ -495,16 +532,20 @@ function updateDraftBody() {
 
   draftBody.radius = radius;
   draftBody.mass = getMassForRadius(radius);
+  draftBody.gravity = getGravityForBody(draftBody);
+  draftBody.gravityRadius = getGravityRadiusForBody(draftBody);
 }
 
 function makeBody({ x, y, radius, color, velocityX, velocityY, isDraft = false }) {
-  return {
+  const body = {
     id: crypto.randomUUID ? crypto.randomUUID() : String(Math.random()),
     x,
     y,
     radius,
-  mass: getMassForRadius(radius),
+    mass: getMassForRadius(radius),
     gravity: 1,
+    gravityRadius: MIN_GRAVITY_RADIUS,
+    isBlackHole: false,
     color,
     velocityX,
     velocityY,
@@ -520,6 +561,11 @@ function makeBody({ x, y, radius, color, velocityX, velocityY, isDraft = false }
     angleHistory: [],
     texture: createSurfaceTexture(color)
   };
+
+  body.gravity = getGravityForBody(body);
+  body.gravityRadius = getGravityRadiusForBody(body);
+
+  return body;
 }
 
 function createSurfaceTexture(baseColor) {
@@ -563,6 +609,7 @@ function stopLoopIfIdle() {
   if (bodies.length === 0 && debris.length === 0 && !draftBody) {
     cancelAnimationFrame(animationId);
     animationId = null;
+    stopSpaceLoopSound();
   }
 }
 
@@ -588,21 +635,30 @@ function loop(now) {
 
 function update(delta) {
   updateDraftBody();
-  reassignParentLocks();
+  updateGravityRadii();
 
   const steps = Math.max(1, Math.ceil(delta / PHYSICS_STEP));
   const stepDelta = delta / steps;
 
   for (let i = 0; i < steps; i++) {
-    applyGravity(stepDelta);
-    applyOrbitCorrection(stepDelta);
-    moveBodies(stepDelta);
-    handleCollisions();
-  }
+  applyGravity(stepDelta);
+  applyGravityCapture(stepDelta);
+  applyBlackHoleDrag(stepDelta);
+  applyOrbitFollow(stepDelta);
+  moveBodies(stepDelta);
+  handleCollisions();
+}
 
   updateTrails();
   detectOrbits();
   updateDebris(delta);
+}
+
+function updateGravityRadii() {
+  bodies.forEach((body) => {
+    body.gravity = getGravityForBody(body);
+    body.gravityRadius = getGravityRadiusForBody(body);
+  });
 }
 
 function applyGravity(delta) {
@@ -623,174 +679,237 @@ function applyGravity(delta) {
       const nx = dx / dist;
       const ny = dy / dist;
 
-      let aAccel = (G * b.mass * b.gravity) / (distSq + SOFTENING);
-      let bAccel = (G * a.mass * a.gravity) / (distSq + SOFTENING);
+      const bFieldStrength = getGravityFieldStrength(b, dist);
+      const aFieldStrength = getGravityFieldStrength(a, dist);
 
-      aAccel *= getGravityMultiplierForPair(a, b);
-      bAccel *= getGravityMultiplierForPair(b, a);
+      if (bFieldStrength > 0 && shouldReactToGravity(a, b)) {
+        const aAccel = (G * b.mass * b.gravity * bFieldStrength) / (distSq + SOFTENING);
 
-      a.velocityX += nx * aAccel * delta;
-      a.velocityY += ny * aAccel * delta;
+        a.velocityX += nx * aAccel * delta;
+        a.velocityY += ny * aAccel * delta;
+      }
 
-      b.velocityX -= nx * bAccel * delta;
-      b.velocityY -= ny * bAccel * delta;
+      if (aFieldStrength > 0 && shouldReactToGravity(b, a)) {
+        const bAccel = (G * a.mass * a.gravity * aFieldStrength) / (distSq + SOFTENING);
+
+        b.velocityX -= nx * bAccel * delta;
+        b.velocityY -= ny * bAccel * delta;
+      }
     }
   }
 }
 
-function getGravityMultiplierForPair(bodyBeingPulled, sourceBody) {
-  const mainMass = getMainMass();
 
-  if (!mainMass) {
-    return 1;
-  }
-
-  if (bodyBeingPulled === mainMass) {
-    return 0;
-  }
-
-  const parent = getCurrentOrbitTarget(bodyBeingPulled);
-
-  if (parent && parent.id === sourceBody.id) {
-    return 1;
-  }
-
-  if (bodyBeingPulled.orbitKind === "moon") {
-    return THIRD_BODY_DAMPING;
-  }
-
-  if (sourceBody === mainMass) {
-    return 1;
-  }
-
-  return SMALL_BODY_INTERACTION;
-}
-
-function applyOrbitCorrection(delta) {
+function applyGravityCapture(delta) {
   bodies.forEach((body) => {
-    const target = getCurrentOrbitTarget(body);
-
-    if (!target || body.mass >= target.mass) {
+    if (body.isBlackHole || body.lockedOrbit) {
       return;
     }
 
-    const orbitStatus = evaluateOrbitCandidate(body, target);
+    const target = findStrongestGravitySource(body);
 
-    if (!body.lockedOrbit && !orbitStatus.candidate) {
+    if (!target || target.isBlackHole || target.mass <= body.mass) {
       return;
     }
 
-    if (!body.lockedOrbit && orbitStatus.candidate) {
-      const assistedCandidate = getCircularizedVelocity(
-        body,
-        target,
-        {
-          x: body.velocityX,
-          y: body.velocityY
-        },
-        1
-      );
+    const distance = getDistance(body, target);
+    const targetRadius = target.gravityRadius || MIN_GRAVITY_RADIUS;
 
-      body.velocityX = lerp(body.velocityX, assistedCandidate.x, CANDIDATE_ORBIT_CORRECTION * delta);
-      body.velocityY = lerp(body.velocityY, assistedCandidate.y, CANDIDATE_ORBIT_CORRECTION * delta);
+    if (distance <= target.radius + body.radius + 8) {
       return;
     }
 
-    const assisted = getCircularizedVelocity(
-      body,
-      target,
-      {
-        x: body.velocityX,
-        y: body.velocityY
-      },
-      1
-    );
+    if (distance > targetRadius * GRAVITY_CAPTURE_MAX_DISTANCE_RATIO) {
+      return;
+    }
 
-    const velocityCorrection = body.orbitKind === "moon"
-      ? MOON_LOCK_CORRECTION
-      : LOCKED_ORBIT_CORRECTION;
+    const dx = body.x - target.x;
+    const dy = body.y - target.y;
 
-    body.velocityX = lerp(body.velocityX, assisted.x, velocityCorrection * delta);
-    body.velocityY = lerp(body.velocityY, assisted.y, velocityCorrection * delta);
+    if (distance < 1) {
+      return;
+    }
 
-    const radiusCorrection = body.orbitKind === "moon"
-      ? MOON_RADIUS_CORRECTION
-      : LOCKED_RADIUS_CORRECTION;
+    const nx = dx / distance;
+    const ny = dy / distance;
 
-    correctOrbitRadius(body, target, radiusCorrection * delta);
+    let tangentX = -ny;
+    let tangentY = nx;
+
+    const relativeVX = body.velocityX - target.velocityX;
+    const relativeVY = body.velocityY - target.velocityY;
+
+    if (relativeVX * tangentX + relativeVY * tangentY < 0) {
+      tangentX = -tangentX;
+      tangentY = -tangentY;
+    }
+
+    const radialVelocity = Math.abs(relativeVX * nx + relativeVY * ny);
+    const tangentVelocity = Math.abs(relativeVX * tangentX + relativeVY * tangentY);
+
+    if (tangentVelocity < GRAVITY_CAPTURE_MIN_TANGENT && radialVelocity < 0.4) {
+      return;
+    }
+
+    const circularSpeed = getCircularOrbitSpeed(target, distance);
+
+    const desiredVelocityX = target.velocityX + tangentX * circularSpeed;
+    const desiredVelocityY = target.velocityY + tangentY * circularSpeed;
+
+    const distanceRatio = clamp(distance / targetRadius, 0, 1);
+    const capturePower = (1 - distanceRatio * 0.55) * GRAVITY_CAPTURE_STRENGTH;
+
+    body.velocityX = lerp(body.velocityX, desiredVelocityX, capturePower * delta);
+    body.velocityY = lerp(body.velocityY, desiredVelocityY, capturePower * delta);
   });
 }
 
-function correctOrbitRadius(body, target, strength) {
-  if (!body.orbitRadius) {
-    body.orbitRadius = getDistance(body, target);
-    return;
-  }
 
-  const dx = body.x - target.x;
-  const dy = body.y - target.y;
-  const distance = Math.sqrt(dx * dx + dy * dy);
 
-  if (distance < 1) {
-    return;
-  }
+function applyOrbitFollow(delta) {
+  bodies.forEach((body) => {
+    if (!body.lockedOrbit || body.isBlackHole || !body.orbitTarget) {
+      return;
+    }
 
-  const nx = dx / distance;
-  const ny = dy / distance;
-  const desiredDistance = body.orbitRadius;
-  const difference = desiredDistance - distance;
+    const target = getBodyById(body.orbitTarget);
 
-  body.x += nx * difference * strength;
-  body.y += ny * difference * strength;
+    if (!target || target === body || target.isBlackHole) {
+      body.lockedOrbit = false;
+      body.orbitTarget = null;
+      body.orbitRadius = null;
+      body.orbitKind = "free";
+      return;
+    }
+
+    const dx = body.x - target.x;
+    const dy = body.y - target.y;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+
+    if (distance < target.radius + body.radius + 4) {
+      return;
+    }
+
+    if (!body.orbitRadius) {
+      body.orbitRadius = distance;
+    }
+
+    const nx = dx / distance;
+    const ny = dy / distance;
+
+    let tangentX = -ny;
+    let tangentY = nx;
+
+    const relativeVX = body.velocityX - target.velocityX;
+    const relativeVY = body.velocityY - target.velocityY;
+
+    if (relativeVX * tangentX + relativeVY * tangentY < 0) {
+      tangentX = -tangentX;
+      tangentY = -tangentY;
+    }
+
+    const circularSpeed = getCircularOrbitSpeed(target, body.orbitRadius);
+
+    const desiredVelocityX = target.velocityX + tangentX * circularSpeed;
+    const desiredVelocityY = target.velocityY + tangentY * circularSpeed;
+
+    const velocityStrength = body.orbitKind === "moon"
+      ? MOON_FOLLOW_STRENGTH
+      : ORBIT_FOLLOW_STRENGTH;
+
+    const radiusStrength = body.orbitKind === "moon"
+      ? MOON_RADIUS_STRENGTH
+      : ORBIT_RADIUS_STRENGTH;
+
+    body.velocityX = lerp(body.velocityX, desiredVelocityX, velocityStrength * delta);
+    body.velocityY = lerp(body.velocityY, desiredVelocityY, velocityStrength * delta);
+
+    const radiusDifference = body.orbitRadius - distance;
+
+    body.x += nx * radiusDifference * radiusStrength * delta;
+    body.y += ny * radiusDifference * radiusStrength * delta;
+  });
 }
 
-function forceCircularOrbit(body, target) {
-  const dx = body.x - target.x;
-  const dy = body.y - target.y;
-  const distance = Math.sqrt(dx * dx + dy * dy);
+function applyBlackHoleDrag(delta) {
+  const blackHoles = bodies.filter((body) => body.isBlackHole);
 
-  if (distance < 1) {
+  if (blackHoles.length === 0) {
     return;
   }
-
-  const orbitRadius = body.orbitRadius || distance;
-  const nx = dx / distance;
-  const ny = dy / distance;
-
-  body.x = target.x + nx * orbitRadius;
-  body.y = target.y + ny * orbitRadius;
-
-  let tangentX = -ny;
-  let tangentY = nx;
-
-  const currentRelativeVelocityX = body.velocityX - target.velocityX;
-  const currentRelativeVelocityY = body.velocityY - target.velocityY;
-
-  if (currentRelativeVelocityX * tangentX + currentRelativeVelocityY * tangentY < 0) {
-    tangentX = -tangentX;
-    tangentY = -tangentY;
-  }
-
-  const circularSpeed = getCircularOrbitSpeed(target, orbitRadius);
-
-  body.velocityX = target.velocityX + tangentX * circularSpeed;
-  body.velocityY = target.velocityY + tangentY * circularSpeed;
-}
-
-
-
-
-function moveBodies(delta) {
-  const mainMass = getMainMass();
 
   bodies.forEach((body) => {
-    limitBodySpeed(body);
+    if (body.isBlackHole) {
+      return;
+    }
 
-    if (body === mainMass) {
+    blackHoles.forEach((blackHole) => {
+      const dx = blackHole.x - body.x;
+      const dy = blackHole.y - body.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+
+      if (distance < 1 || distance > blackHole.gravityRadius) {
+        return;
+      }
+
+      const nx = dx / distance;
+      const ny = dy / distance;
+      const influence = 1 - clamp(distance / blackHole.gravityRadius, 0, 1);
+
+      const relativeVX = body.velocityX - blackHole.velocityX;
+      const relativeVY = body.velocityY - blackHole.velocityY;
+
+      const radialVelocity = relativeVX * nx + relativeVY * ny;
+      const radialVX = nx * radialVelocity;
+      const radialVY = ny * radialVelocity;
+
+      const tangentVX = relativeVX - radialVX;
+      const tangentVY = relativeVY - radialVY;
+
+      body.velocityX -= tangentVX * BLACK_HOLE_DRAG * influence * delta;
+      body.velocityY -= tangentVY * BLACK_HOLE_DRAG * influence * delta;
+
+      body.velocityX += nx * BLACK_HOLE_INWARD_PULL * influence * delta;
+      body.velocityY += ny * BLACK_HOLE_INWARD_PULL * influence * delta;
+    });
+  });
+}
+
+function shouldReactToGravity(bodyBeingPulled, sourceBody) {
+  if (sourceBody.isBlackHole) {
+    return true;
+  }
+
+  if (bodyBeingPulled.isBlackHole) {
+    return false;
+  }
+
+  return sourceBody.mass >= bodyBeingPulled.mass * MIN_REACTION_MASS_RATIO;
+}
+
+function getGravityFieldStrength(sourceBody, distance) {
+  if (sourceBody.isBlackHole) {
+    return 1;
+  }
+
+  const radius = sourceBody.gravityRadius || MIN_GRAVITY_RADIUS;
+
+  if (distance > radius) {
+    return 0;
+  }
+
+  return 1;
+}
+
+function moveBodies(delta) {
+  bodies.forEach((body) => {
+    if (body.isBlackHole) {
       body.velocityX = 0;
       body.velocityY = 0;
       return;
     }
+
+    limitBodySpeed(body);
 
     body.x += body.velocityX * delta;
     body.y += body.velocityY * delta;
@@ -807,30 +926,33 @@ function updateTrails() {
   });
 }
 
-
-
-
-
 function detectOrbits() {
   bodies.forEach((body) => {
-    const target = getCurrentOrbitTarget(body);
+    const lockedTarget = body.lockedOrbit && body.orbitTarget
+    ? getBodyById(body.orbitTarget)
+    : null;
+
+    const target = lockedTarget || findStrongestGravitySource(body);
 
     if (!target) {
+      body.orbitScore = Math.max(0, body.orbitScore - 2);
+      body.lockedOrbit = false;
       return;
+    }
+
+    if (body.orbitTarget !== target.id) {
+      body.orbitTarget = target.id;
+      body.recentDistances = [];
+      body.angleHistory = [];
+      body.orbitScore = 0;
+      body.orbitAnnounced = false;
+      body.lockedOrbit = false;
     }
 
     const dx = body.x - target.x;
     const dy = body.y - target.y;
     const distance = Math.sqrt(dx * dx + dy * dy);
     const angle = Math.atan2(dy, dx);
-
-    if (!body.recentDistances) {
-      body.recentDistances = [];
-    }
-
-    if (!body.angleHistory) {
-      body.angleHistory = [];
-    }
 
     body.recentDistances.push(distance);
     body.angleHistory.push(angle);
@@ -846,7 +968,7 @@ function detectOrbits() {
     const orbitStatus = evaluateOrbitCandidate(body, target);
 
     if (orbitStatus.steady) {
-      body.orbitScore = Math.min(ORBIT_CONFIRM_SCORE + 40, body.orbitScore + 4);
+      body.orbitScore = Math.min(ORBIT_CONFIRM_SCORE + 40, body.orbitScore + 3);
     } else if (orbitStatus.candidate) {
       body.orbitScore = Math.min(ORBIT_CONFIRM_SCORE, body.orbitScore + 1);
     } else {
@@ -854,37 +976,28 @@ function detectOrbits() {
     }
 
     if (!body.lockedOrbit && body.orbitScore >= ORBIT_CONFIRM_SCORE && orbitStatus.steady) {
-      body.lockedOrbit = true;
-      body.orbitRadius = orbitStatus.averageDistance || distance;
-      body.trail = [];
-      playSound("planetMerge");
+  if (target.isBlackHole) {
+    body.lockedOrbit = false;
+    body.orbitTarget = null;
+    body.orbitRadius = null;
+    body.orbitKind = "free";
+    return;
+  }
 
-      forceCircularOrbit(body, target);
-
-      setObservation(
-        body.orbitKind === "moon" ? "Moon Orbit Locked" : "Circular Orbit Locked",
-        body.orbitKind === "moon"
-          ? "The moon completed enough of a curve around the planet. It is now correcting into a circular orbit."
-          : "The body completed enough of a curve around the main mass. It is now correcting into a circular orbit.",
-        260
-      );
-    }
-
-    if (body.lockedOrbit && !body.orbitAnnounced && body.angleHistory.length > 110) {
-      body.orbitAnnounced = true;
+  body.lockedOrbit = true;
+  body.orbitAnnounced = true;
+  body.orbitRadius = orbitStatus.averageDistance || distance;
+  body.orbitKind = target.mass > body.mass ? "planet" : "free";
+  playSound("planetMerge");
 
       setObservation(
-        body.orbitKind === "moon" ? "Moon Orbit" : "Planet Orbit",
-        body.orbitKind === "moon"
-          ? "The moon is now visibly orbiting the nearby planet."
-          : "The planet is now visibly orbiting the biggest mass.",
-        220
+        "Orbit Detected",
+        "A body is orbiting naturally. — gravity and inertia are doing the work.",
+        240
       );
     }
   });
 }
-
-
 
 function evaluateOrbitCandidate(body, target) {
   const dx = target.x - body.x;
@@ -917,11 +1030,11 @@ function evaluateOrbitCandidate(body, target) {
   const tangentSpeed = Math.sqrt(Math.max(0, speed * speed - radialSpeed * radialSpeed));
 
   const candidate =
-    speedRatio > 0.5 &&
-    speedRatio < 1.95 &&
-    tangentSpeed > radialSpeed * 0.9;
+    speedRatio > 0.28 &&
+    speedRatio < 2.9 &&
+    tangentSpeed > radialSpeed * 0.32;
 
-  if (!candidate || !body.recentDistances || body.recentDistances.length < 55) {
+  if (!candidate || !body.recentDistances || body.recentDistances.length < 70) {
     return {
       candidate,
       steady: false,
@@ -938,14 +1051,45 @@ function evaluateOrbitCandidate(body, target) {
 
   const steady =
     candidate &&
-    distanceVariance < 0.34 &&
-    angularTravel > Math.PI * 0.8;
+    distanceVariance < ORBIT_VARIANCE_LIMIT &&
+    angularTravel > Math.PI * 1.05;
 
   return {
     candidate,
     steady,
     averageDistance
   };
+}
+
+function findStrongestGravitySource(body) {
+  let bestSource = null;
+  let bestInfluence = 0;
+
+  bodies.forEach((source) => {
+    if (source === body) {
+      return;
+    }
+
+    if (!shouldReactToGravity(body, source)) {
+      return;
+    }
+
+    const distance = getDistance(body, source);
+    const fieldStrength = getGravityFieldStrength(source, distance);
+
+    if (fieldStrength <= 0) {
+      return;
+    }
+
+    const influence = (source.mass * source.gravity * fieldStrength) / (distance * distance + SOFTENING);
+
+    if (influence > bestInfluence) {
+      bestInfluence = influence;
+      bestSource = source;
+    }
+  });
+
+  return bestSource;
 }
 
 function getAngularTravel(angles) {
@@ -989,6 +1133,14 @@ function handleCollisions() {
           continue;
         }
 
+        if (a.isBlackHole || b.isBlackHole) {
+          const blackHole = a.isBlackHole ? a : b;
+          const otherBody = blackHole === a ? b : a;
+          absorbIntoBlackHole(blackHole, otherBody);
+          handled = true;
+          break;
+        }
+
         const relativeSpeed = getRelativeSpeed(a, b);
 
         if (shouldAccreteTinyImpact(a, b) || relativeSpeed <= SLOW_MERGE_SPEED) {
@@ -1012,8 +1164,8 @@ function shouldAccreteTinyImpact(a, b) {
   const bigger = a.mass >= b.mass ? a : b;
   const smaller = bigger === a ? b : a;
 
-  const massRatio = smaller.mass / bigger.mass;
-  const radiusRatio = smaller.radius / bigger.radius;
+  const massRatio = smaller.mass / Math.max(bigger.mass, 1);
+  const radiusRatio = smaller.radius / Math.max(bigger.radius, 1);
 
   return massRatio <= TINY_IMPACT_MASS_RATIO || radiusRatio <= TINY_IMPACT_RADIUS_RATIO;
 }
@@ -1039,7 +1191,7 @@ function getLaunchVelocity(body) {
     return { x: 0, y: 0 };
   }
 
-  const sizeFactor = clamp(34 / body.radius, 0.28, 1.45);
+  const sizeFactor = clamp(34 / Math.max(body.radius, 1), 0.28, 1.45);
 
   return limitVelocity(
     {
@@ -1050,191 +1202,43 @@ function getLaunchVelocity(body) {
   );
 }
 
-function getReleaseAssistedVelocity(body, target, userVelocity) {
-  const userSpeed = Math.sqrt(userVelocity.x * userVelocity.x + userVelocity.y * userVelocity.y);
-
-  if (userSpeed < 0.35) {
-    return getCircularizedVelocity(body, target, userVelocity, LOW_SPEED_RELEASE_ASSIST);
-  }
-
-  return getCircularizedVelocity(body, target, userVelocity, RELEASE_ASSIST);
-}
-
-function getCircularizedVelocity(body, target, userVelocity, blendAmount) {
-  const dx = target.x - body.x;
-  const dy = target.y - body.y;
-  const distance = Math.sqrt(dx * dx + dy * dy);
-
-  if (distance < target.radius * 1.8) {
-    return userVelocity;
-  }
-
-  const nx = dx / distance;
-  const ny = dy / distance;
-
-  let tx = -ny;
-  let ty = nx;
-
-  const userSpeed = Math.sqrt(userVelocity.x * userVelocity.x + userVelocity.y * userVelocity.y);
-
-  if (userSpeed > 0.1 && userVelocity.x * tx + userVelocity.y * ty < 0) {
-    tx = -tx;
-    ty = -ty;
-  }
-
-  const orbitDistance = body.lockedOrbit && body.orbitRadius
-    ? body.orbitRadius
-    : distance;
-
-  const circularSpeed = getCircularOrbitSpeed(target, orbitDistance);
-
-  const circularVelocity = {
-    x: tx * circularSpeed + target.velocityX,
-    y: ty * circularSpeed + target.velocityY
-  };
-
-  return limitVelocity(
-    {
-      x: lerp(userVelocity.x, circularVelocity.x, blendAmount),
-      y: lerp(userVelocity.y, circularVelocity.y, blendAmount)
-    },
-    MAX_SPEED
-  );
-}
-
-function chooseOrbitParent(body) {
-  if (bodies.length === 0) {
-    return null;
-  }
-
-  const mainMass = getMainMass();
-  const closestMoonParent = findClosestMoonParent(body, mainMass);
-
-  if (closestMoonParent) {
-    return closestMoonParent;
-  }
-
-  if (mainMass && mainMass.mass > body.mass) {
-    return mainMass;
-  }
-
-  return null;
-}
-
-function findClosestMoonParent(body, mainMass) {
-  let closestParent = null;
-  let closestDistance = Infinity;
-
-  bodies.forEach((candidate) => {
-    if (candidate === body) {
-      return;
-    }
-
-    if (candidate === mainMass) {
-      return;
-    }
-
-    if (candidate.mass <= body.mass) {
-      return;
-    }
-
-    if (candidate.orbitKind !== "planet" && !candidate.lockedOrbit) {
-      return;
-    }
-
-    const distanceToCandidate = getDistance(body, candidate);
-    const moonZone = Math.max(
-      candidate.radius * MOON_TARGET_DISTANCE_MULTIPLIER,
-      candidate.radius + body.radius + 170
-    );
-
-    if (distanceToCandidate > moonZone) {
-      return;
-    }
-
-    if (mainMass) {
-      const distanceToSun = getDistance(body, mainMass);
-
-      if (distanceToCandidate > distanceToSun) {
-        return;
-      }
-    }
-
-    if (distanceToCandidate < closestDistance) {
-      closestDistance = distanceToCandidate;
-      closestParent = candidate;
-    }
-  });
-
-  return closestParent;
-}
-
-function reassignParentLocks() {
-  const mainMass = getMainMass();
-
-  if (!mainMass) {
-    return;
-  }
-
-  bodies.forEach((body) => {
-    if (body === mainMass) {
-      body.orbitTarget = null;
-      body.lockedOrbit = false;
-      body.orbitKind = "sun";
-      body.orbitRadius = null;
-      return;
-    }
-
-    if (body.orbitKind === "moon") {
-      const parent = getBodyById(body.orbitTarget);
-
-      if (parent && parent !== mainMass && parent.mass > body.mass) {
-        const distance = getDistance(body, parent);
-        const maxMoonDistance = parent.radius * MOON_LOCK_DISTANCE_MULTIPLIER;
-
-        if (distance <= maxMoonDistance) {
-          return;
-        }
-      }
-    }
-
-    if (mainMass.mass > body.mass && body.orbitKind !== "moon") {
-      if (body.orbitTarget !== mainMass.id) {
-        body.orbitScore = 0;
-        body.lockedOrbit = false;
-        body.orbitRadius = getDistance(body, mainMass);
-        body.trail = [];
-      }
-
-      body.orbitTarget = mainMass.id;
-      body.orbitKind = "planet";
-    }
-  });
-}
-
-function getCurrentOrbitTarget(body) {
-  if (!body.orbitTarget) {
-    return null;
-  }
-
-  const target = getBodyById(body.orbitTarget);
-
-  if (!target || target === body || target.mass <= body.mass) {
-    body.orbitTarget = null;
-    body.lockedOrbit = false;
-    body.orbitKind = "free";
-    body.orbitRadius = null;
-    return null;
-  }
-
-  return target;
-}
-
 function getCircularOrbitSpeed(target, distance) {
   const safeDistance = Math.max(distance, target.radius * 3.1);
   const targetGravity = target.gravity || 1;
 
   return Math.sqrt((G * target.mass * targetGravity * safeDistance) / (safeDistance * safeDistance + SOFTENING));
+}
+
+function getGravityForBody(body) {
+  if (body.isBlackHole) {
+    return BLACK_HOLE_GRAVITY;
+  }
+
+  if (body.radius >= 85) {
+    return 1.35;
+  }
+
+  if (body.radius >= 45) {
+    return 1.1;
+  }
+
+  if (body.radius <= 18) {
+    return 0.85;
+  }
+
+  return 1;
+}
+
+function getGravityRadiusForBody(body) {
+  if (body.isBlackHole) {
+    return MAX_GRAVITY_RADIUS * BLACK_HOLE_RADIUS_MULTIPLIER;
+  }
+
+  return clamp(
+    body.radius * GRAVITY_RADIUS_MULTIPLIER,
+    MIN_GRAVITY_RADIUS,
+    MAX_GRAVITY_RADIUS
+  );
 }
 
 function getMainMass() {
@@ -1252,7 +1256,7 @@ function isMainMass(body) {
 }
 
 function actsLikeSun(big, other) {
-  return big === getMainMass() && big.mass > other.mass;
+  return big.mass > other.mass;
 }
 
 function isDominantSun(body) {
@@ -1274,6 +1278,7 @@ function getRelativeSpeed(a, b) {
   return Math.sqrt(vx * vx + vy * vy);
 }
 
+
 function getBodyById(id) {
   return bodies.find((body) => body.id === id) || null;
 }
@@ -1288,32 +1293,32 @@ function getDistance(a, b) {
 function mergeBodies(a, b) {
   const totalMass = a.mass + b.mass;
   const dominant = a.mass >= b.mass ? a : b;
-  const weaker = dominant === a ? b : a;
 
-  const mergedX = (a.x * a.mass + b.x * b.mass) / totalMass;
-  const mergedY = (a.y * a.mass + b.y * b.mass) / totalMass;
+  const mergedX = (a.x * a.mass + b.x * b.mass) / Math.max(totalMass, 1);
+  const mergedY = (a.y * a.mass + b.y * b.mass) / Math.max(totalMass, 1);
 
-  let mergedVX = (a.velocityX * a.mass + b.velocityX * b.mass) / totalMass;
-  let mergedVY = (a.velocityY * a.mass + b.velocityY * b.mass) / totalMass;
-
-  if (actsLikeSun(dominant, weaker)) {
-    mergedVX *= 0.12;
-    mergedVY *= 0.12;
-  }
+  const mergedVX = (a.velocityX * a.mass + b.velocityX * b.mass) / Math.max(totalMass, 1);
+  const mergedVY = (a.velocityY * a.mass + b.velocityY * b.mass) / Math.max(totalMass, 1);
 
   a.x = mergedX;
   a.y = mergedY;
   a.mass = totalMass;
   a.radius = getRadiusForMass(totalMass);
+  a.gravity = getGravityForBody(a);
+  a.gravityRadius = getGravityRadiusForBody(a);
   a.velocityX = mergedVX;
   a.velocityY = mergedVY;
-  a.color = dominant.color;
+  a.isBlackHole = Boolean(dominant.isBlackHole);
+  a.color = a.isBlackHole ? "#020204" : dominant.color;
+  a.gravity = getGravityForBody(a);
+  a.gravityRadius = getGravityRadiusForBody(a);
   a.trail = [];
   a.orbitScore = 0;
   a.orbitTarget = null;
   a.orbitAnnounced = false;
   a.lockedOrbit = false;
   a.orbitKind = "free";
+  a.orbitTarget = null;
   a.orbitRadius = null;
   a.recentDistances = [];
   a.angleHistory = [];
@@ -1321,15 +1326,15 @@ function mergeBodies(a, b) {
 
   bodies = bodies.filter((body) => body !== b);
 
-  reassignParentLocks();
   playSound("planetMerge");
-createExplosion(mergedX, mergedY, dominant.color, 22, 0.9);
-setObservation("Fusion", "Masses collided and merged into a larger body.", 180);
+  createExplosion(mergedX, mergedY, dominant.color, 22, 0.9);
+  setObservation("Fusion", "Masses collided and merged. Momentum is conserved, so the new body keeps moving.", 180);
 }
 
 function shatterBodies(a, b, speed) {
   const x = (a.x + b.x) / 2;
   const y = (a.y + b.y) / 2;
+
   playSound("planetChange");
 
   createFragments(a, speed);
@@ -1338,13 +1343,11 @@ function shatterBodies(a, b, speed) {
 
   bodies = bodies.filter((body) => body !== a && body !== b);
 
-  reassignParentLocks();
-
   if (debris.length > MAX_DEBRIS) {
     debris = debris.slice(debris.length - MAX_DEBRIS);
   }
 
-  setObservation("Collision", "Fast-moving masses collided and shattered into small fragments.", 200);
+  setObservation("Collision", "Fast-moving masses shattered into fragments. Nearby bodies keep their inertia.", 200);
 }
 
 function createFragments(body, impactSpeed) {
@@ -1465,7 +1468,12 @@ function draw() {
 
   ctx.clearRect(0, 0, rect.width, rect.height);
 
+  ctx.save();
+  ctx.scale(cameraZoom, cameraZoom);
+  ctx.translate(-cameraX, -cameraY);
+
   drawGravityWells();
+  drawGravityRadiusRings();
   drawTrails();
   drawDebris();
 
@@ -1473,8 +1481,11 @@ function draw() {
 
   if (draftBody) {
     drawAimLine(draftBody);
+    drawGravityRadiusRing(draftBody, 0.32);
     drawBody(draftBody);
   }
+
+  ctx.restore();
 }
 
 function drawGravityWells() {
@@ -1493,13 +1504,31 @@ function drawGravityWells() {
   });
 }
 
+function drawGravityRadiusRings() {
+  bodies.forEach((body) => {
+    drawGravityRadiusRing(body, body.lockedOrbit ? 0.24 : 0.14);
+  });
+}
+
+function drawGravityRadiusRing(body, alpha) {
+  const radius = body.gravityRadius || MIN_GRAVITY_RADIUS;
+
+  ctx.save();
+  ctx.strokeStyle = hexToRgba(body.color, alpha);
+  ctx.lineWidth = body.isBlackHole ? 2 : body.lockedOrbit ? 1.4 : 1;
+  ctx.beginPath();
+  ctx.arc(body.x, body.y, radius, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+}
+
 function drawTrails() {
   bodies.forEach((body) => {
     if (body.trail.length < 3) {
       return;
     }
 
-    ctx.beginPath();
+        ctx.beginPath();
 
     body.trail.forEach((point, index) => {
       if (index === 0) {
@@ -1528,6 +1557,12 @@ function drawDebris() {
 }
 
 function drawBody(body) {
+  if (body.isBlackHole) {
+    drawBlackHole(body);
+    drawMassLabel(body);
+    return;
+  }
+
   const shadowColor = hexToRgba(body.color, 0.7);
 
   ctx.save();
@@ -1550,6 +1585,39 @@ function drawBody(body) {
 
   drawPlanetRim(body);
   drawMassLabel(body);
+}
+
+function drawBlackHole(body) {
+  const pullRadius = clamp(body.radius * 3.2, 40, 220);
+
+  ctx.save();
+
+  const halo = ctx.createRadialGradient(body.x, body.y, body.radius * 0.5, body.x, body.y, pullRadius);
+  halo.addColorStop(0, "rgba(255, 255, 255, 0.55)");
+  halo.addColorStop(0.08, "rgba(40, 40, 55, 0.38)");
+  halo.addColorStop(0.35, "rgba(125, 80, 255, 0.18)");
+  halo.addColorStop(1, "rgba(0, 0, 0, 0)");
+
+  ctx.fillStyle = halo;
+  ctx.beginPath();
+  ctx.arc(body.x, body.y, pullRadius, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.shadowBlur = 45;
+  ctx.shadowColor = "rgba(130, 90, 255, 0.9)";
+  ctx.fillStyle = "#020204";
+  ctx.beginPath();
+  ctx.arc(body.x, body.y, body.radius, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.68)";
+  ctx.lineWidth = Math.max(1, body.radius * 0.08);
+  ctx.beginPath();
+  ctx.arc(body.x, body.y, body.radius * 1.05, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.restore();
 }
 
 function createPlanetGradient(body) {
@@ -1635,7 +1703,7 @@ function drawPlanetRim(body) {
 }
 
 function drawMassLabel(body) {
-  const label = `Mass ${Math.round(body.mass)}`;
+  const label = body.isBlackHole ? `Black Hole ${Math.round(body.mass)}` : `Mass ${Math.round(body.mass)}`;
 
   ctx.font = "800 11px Arial";
 
@@ -1719,10 +1787,13 @@ function lerp(a, b, t) {
   return a + (b - a) * t;
 }
 
+function smoothstep(value) {
+  return value * value * (3 - 2 * value);
+}
+
 function random(min, max) {
   return Math.random() * (max - min) + min;
 }
-
 
 function getMassForRadius(radius) {
   return Math.max(0, radius * radius - MIN_RADIUS * MIN_RADIUS);
@@ -1785,33 +1856,476 @@ function toHex(value) {
   return Math.round(value).toString(16).padStart(2, "0");
 }
 
+function createMassPanel() {
+  if (massPanel) {
+    return;
+  }
+
+  injectMassPanelStyles();
+
+  massPanel = document.createElement("aside");
+  massPanel.className = "mass-panel";
+  massPanel.innerHTML = `
+    <div class="mass-panel-card">
+      <div class="mass-panel-header">
+        <strong>Masses in action</strong>
+      </div>
+      <div class="mass-panel-list"></div>
+    </div>
+    <div class="mass-panel-tab">Masses</div>
+  `;
+
+  massPanelList = massPanel.querySelector(".mass-panel-list");
+  labArea.appendChild(massPanel);
+
+  massPanel.addEventListener("pointerdown", stopPanelInteraction, true);
+  massPanel.addEventListener("pointerup", handleMassPanelAction, true);
+  massPanel.addEventListener("click", stopPanelInteraction, true);
+}
+
+function injectMassPanelStyles() {
+  if (document.getElementById("mass-panel-styles")) {
+    return;
+  }
+
+  const style = document.createElement("style");
+  style.id = "mass-panel-styles";
+  style.textContent = `
+    .mass-panel {
+      position: absolute;
+      left: 0;
+      top: 18px;
+      z-index: 120;
+      display: flex;
+      align-items: flex-start;
+      transform: translateX(-292px);
+      transition: transform 180ms ease, opacity 180ms ease;
+      opacity: 0.82;
+      pointer-events: auto;
+      font-family: inherit;
+    }
+
+    .mass-panel:hover,
+    .mass-panel:focus-within {
+      transform: translateX(14px);
+      opacity: 1;
+    }
+
+    .mass-panel-tab {
+      width: 42px;
+      min-height: 122px;
+      display: grid;
+      place-items: center;
+      margin-left: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      border-radius: 999px;
+      background: rgba(0, 0, 0, 0.78);
+      color: rgba(255, 255, 255, 0.86);
+      font-size: 0.72rem;
+      font-weight: 900;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      writing-mode: vertical-rl;
+      text-orientation: mixed;
+      backdrop-filter: blur(10px);
+      box-shadow: 0 14px 34px rgba(0, 0, 0, 0.34);
+      cursor: default;
+      user-select: none;
+    }
+
+    .mass-panel-card {
+      width: 292px;
+      max-height: min(640px, calc(100vh - 80px));
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 20px;
+      background: rgba(0, 0, 0, 0.82);
+      box-shadow: 0 18px 60px rgba(0, 0, 0, 0.42);
+      backdrop-filter: blur(14px);
+    }
+
+    .mass-panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 13px 14px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      color: rgba(255, 255, 255, 0.9);
+      font-size: 0.78rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .mass-panel-list {
+      max-height: min(570px, calc(100vh - 145px));
+      overflow-y: auto;
+      padding: 10px;
+    }
+
+    .mass-empty {
+      padding: 15px;
+      border: 1px dashed rgba(255, 255, 255, 0.12);
+      border-radius: 14px;
+      color: rgba(255, 255, 255, 0.55);
+      font-size: 0.82rem;
+      line-height: 1.4;
+    }
+
+    .mass-row {
+      display: grid;
+      gap: 9px;
+      margin-bottom: 10px;
+      padding: 10px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.045);
+    }
+
+    .mass-row.is-black-hole {
+      border-color: rgba(180, 150, 255, 0.34);
+      background: linear-gradient(135deg, rgba(125, 80, 255, 0.16), rgba(255, 255, 255, 0.035));
+    }
+
+    .mass-row-top {
+      display: grid;
+      grid-template-columns: 14px 1fr auto;
+      align-items: center;
+      gap: 8px;
+      color: rgba(255, 255, 255, 0.86);
+      font-size: 0.82rem;
+      font-weight: 900;
+    }
+
+    .mass-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 999px;
+      box-shadow: 0 0 18px currentColor;
+      background: currentColor;
+    }
+
+    .mass-meta {
+      color: rgba(255, 255, 255, 0.48);
+      font-size: 0.7rem;
+      font-weight: 800;
+    }
+
+    .mass-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 6px;
+    }
+
+    .mass-actions button {
+      min-width: 0;
+      min-height: 34px;
+      padding: 8px 6px;
+      border-radius: 999px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      background: rgba(255, 255, 255, 0.07);
+      color: rgba(255, 255, 255, 0.76);
+      font-size: 0.66rem;
+      font-weight: 900;
+      line-height: 1;
+      cursor: pointer;
+      pointer-events: auto;
+    }
+
+    .mass-actions button:hover {
+      transform: none;
+      background: rgba(255, 255, 255, 0.14);
+      border-color: rgba(255, 255, 255, 0.25);
+    }
+
+    .mass-actions button[data-action="destroy"] {
+      color: rgba(255, 120, 145, 0.9);
+    }
+
+    .mass-actions button[data-action="blackhole"] {
+      color: rgba(185, 160, 255, 0.94);
+    }
+
+    .mass-actions button:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+    }
+  `;
+
+  document.head.appendChild(style);
+}
+
+  
+
+function updateMassPanel() {
+  if (!massPanelList) {
+    return;
+  }
+
+  if (bodies.length === 0) {
+    massPanelList.innerHTML = `<div class="mass-empty">No masses yet. Hold and drag in space to create the first one.</div>`;
+    return;
+  }
+
+  massPanelList.innerHTML = bodies.map((body, index) => {
+    const name = body.isBlackHole ? `Black Hole ${index + 1}` : `Mass ${index + 1}`;
+    const color = body.isBlackHole ? "#b9a0ff" : body.color;
+    const speed = Math.sqrt(body.velocityX * body.velocityX + body.velocityY * body.velocityY);
+    const rowClass = body.isBlackHole ? "mass-row is-black-hole" : "mass-row";
+    const moonDisabled = body.isBlackHole ? "disabled" : "";
+
+    return `
+      <div class="${rowClass}" data-id="${body.id}">
+        <div class="mass-row-top">
+          <span class="mass-dot" style="color:${color}"></span>
+          <span>${name}</span>
+          <span class="mass-meta">${Math.round(body.mass)}</span>
+        </div>
+        <div class="mass-meta">radius ${Math.round(body.radius)} · gravity range ${Math.round(body.gravityRadius)} · speed ${speed.toFixed(1)}</div>
+        <div class="mass-actions">
+          <button type="button" data-action="moon" data-id="${body.id}" ${moonDisabled}>Add moon</button>
+          <button type="button" data-action="destroy" data-id="${body.id}">Destroy</button>
+          <button type="button" data-action="blackhole" data-id="${body.id}">Black hole</button>
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
+function stopPanelInteraction(event) {
+  event.stopPropagation();
+}
+
+function handleMassPanelAction(event) {
+  event.preventDefault();
+  event.stopPropagation();
+
+  const button = event.target.closest("button[data-action]");
+
+  if (!button || button.disabled) {
+    return;
+  }
+
+  const body = bodies.find((item) => item.id === button.dataset.id);
+
+  if (!body) {
+    return;
+  }
+
+  const action = button.dataset.action;
+
+  if (action === "moon") {
+    addMoonToBody(body);
+  }
+
+  if (action === "destroy") {
+    destroyBody(body);
+  }
+
+  if (action === "blackhole") {
+    turnIntoBlackHole(body);
+  }
+
+  updateHud();
+  draw();
+  startLoop();
+}
+
+function addMoonToBody(parent) {
+  if (!parent || parent.isBlackHole) {
+    return;
+  }
+
+  const moonMass = Math.max(18, parent.mass * MOON_MASS_RATIO);
+  const moonRadius = clamp(getRadiusForMass(moonMass), MIN_RADIUS + 2, MAX_RADIUS * 0.62);
+  const angle = Math.random() * Math.PI * 2;
+  const orbitDistance = clamp(
+    parent.radius * 3.8 + moonRadius * 2.2,
+    parent.radius + moonRadius + 55,
+    Math.max(parent.radius + moonRadius + 70, parent.gravityRadius * 0.62)
+  );
+
+  const moonX = parent.x + Math.cos(angle) * orbitDistance;
+  const moonY = parent.y + Math.sin(angle) * orbitDistance;
+
+  let tangentX = -Math.sin(angle);
+  let tangentY = Math.cos(angle);
+
+  if (Math.random() < 0.5) {
+    tangentX *= -1;
+    tangentY *= -1;
+  }
+
+  const moonColor = COLORS[(bodies.length + 2) % COLORS.length];
+  const moon = makeBody({
+    x: moonX,
+    y: moonY,
+    radius: moonRadius,
+    color: moonColor,
+    velocityX: 0,
+    velocityY: 0,
+    isDraft: false
+  });
+
+  moon.mass = moonMass;
+  moon.radius = moonRadius;
+  moon.gravity = getGravityForBody(moon);
+  moon.gravityRadius = getGravityRadiusForBody(moon);
+
+  const orbitSpeed = getCircularOrbitSpeed(parent, orbitDistance);
+  moon.velocityX = parent.velocityX + tangentX * orbitSpeed;
+  moon.velocityY = parent.velocityY + tangentY * orbitSpeed;
+  moon.orbitTarget = parent.id;
+  moon.orbitRadius = orbitDistance;
+  moon.lockedOrbit = true;
+  moon.orbitKind = "moon";
+  moon.orbitAnnounced = true;
+
+  bodies.push(moon);
+  playSound("planetMerge");
+  setObservation("Moon Added", "A moon was placed with 20% of the selected mass and launched at orbital speed.", 180);
+}
+
+function destroyBody(body) {
+  playSound("planetChange");
+  createExplosion(body.x, body.y, body.isBlackHole ? "#b9a0ff" : body.color, 34, 1.25);
+  bodies = bodies.filter((item) => item !== body);
+  setObservation("Mass Destroyed", "The selected mass was removed. Other bodies keep their current inertia.", 160);
+}
+
+function turnIntoBlackHole(body) {
+  body.isBlackHole = true;
+  body.color = "#020204";
+  body.velocityX = 0;
+  body.velocityY = 0;
+  body.gravity = getGravityForBody(body);
+  body.gravityRadius = getGravityRadiusForBody(body);
+  body.trail = [];
+  body.lockedOrbit = false;
+  body.orbitTarget = null;
+  body.orbitRadius = null;
+  body.orbitAnnounced = false;
+  body.texture = createSurfaceTexture("#111827");
+
+  playSound("planetChange");
+  setObservation("Black Hole", "The selected mass became a fixed black hole. It will pull every body, including future masses.", 220);
+}
+
+function absorbIntoBlackHole(blackHole, otherBody) {
+  const totalMass = blackHole.mass + otherBody.mass;
+
+  blackHole.mass = totalMass;
+  blackHole.radius = clamp(getRadiusForMass(totalMass) * 0.7, MIN_RADIUS + 8, MAX_RADIUS * 1.35);
+  blackHole.gravity = getGravityForBody(blackHole);
+  blackHole.gravityRadius = getGravityRadiusForBody(blackHole);
+  blackHole.velocityX = 0;
+  blackHole.velocityY = 0;
+  blackHole.trail = [];
+
+  bodies = bodies.filter((body) => body !== otherBody);
+
+  playSound("planetMerge");
+  createExplosion(blackHole.x, blackHole.y, "#b9a0ff", 18, 0.85);
+  setObservation("Absorbed", "The black hole absorbed a mass and stayed fixed in place.", 160);
+}
+
 function stopControlClicks(event) {
   event.stopPropagation();
 }
 
-function getGravityForBody(body) {
-  if (body.radius >= 85) {
-    return 1.35; // huge sun-like body
+function isCameraDragGesture(event) {
+  return event.button === 1 || event.button === 2 || event.shiftKey;
+}
+
+function startCameraDrag(event) {
+  event.preventDefault();
+
+  isCameraDragging = true;
+  cameraDragPointerId = event.pointerId;
+  cameraDragStartX = event.clientX;
+  cameraDragStartY = event.clientY;
+  cameraStartX = cameraX;
+  cameraStartY = cameraY;
+
+  labArea.classList.add("panning");
+
+  try {
+    labArea.setPointerCapture(event.pointerId);
+  } catch (error) {
+    // Safe fallback.
+  }
+}
+
+function dragCamera(event) {
+  if (!isCameraDragging) {
+    return;
   }
 
-  if (body.radius >= 45) {
-    return 1.1; // medium planet
+  if (cameraDragPointerId !== null && event.pointerId !== cameraDragPointerId) {
+    return;
   }
 
-  if (body.radius <= 18) {
-    return 0.85; // tiny moon
+  event.preventDefault();
+
+  const dx = (event.clientX - cameraDragStartX) / cameraZoom;
+  const dy = (event.clientY - cameraDragStartY) / cameraZoom;
+
+  cameraX = cameraStartX - dx;
+  cameraY = cameraStartY - dy;
+
+  draw();
+}
+
+function stopCameraDrag(event) {
+  if (!isCameraDragging) {
+    return;
   }
 
-  return 1;
+  if (cameraDragPointerId !== null && event && event.pointerId !== cameraDragPointerId) {
+    return;
+  }
+
+  isCameraDragging = false;
+  cameraDragPointerId = null;
+  labArea.classList.remove("panning");
+}
+
+function zoomView(event) {
+  if (event.target.closest(".lab-controls") || event.target.closest(".mass-panel")) {
+    return;
+  }
+
+  event.preventDefault();
+
+  const screenPoint = getScreenPointerPosition(event);
+  const worldBeforeZoom = screenToWorld(screenPoint.x, screenPoint.y);
+
+  const zoomFactor = event.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
+  const nextZoom = clamp(cameraZoom * zoomFactor, MIN_VIEW_ZOOM, MAX_VIEW_ZOOM);
+
+  cameraZoom = nextZoom;
+  cameraX = worldBeforeZoom.x - screenPoint.x / cameraZoom;
+  cameraY = worldBeforeZoom.y - screenPoint.y / cameraZoom;
+
+  draw();
 }
 
 labArea.addEventListener("pointerdown", startDraft);
+labArea.addEventListener("wheel", zoomView, { passive: false });
+labArea.addEventListener("contextmenu", (event) => event.preventDefault());
+
+window.addEventListener("pointermove", dragCamera);
 window.addEventListener("pointermove", aimDraft);
+
+window.addEventListener("pointerup", stopCameraDrag);
 window.addEventListener("pointerup", releaseDraft);
+
+window.addEventListener("pointercancel", stopCameraDrag);
 window.addEventListener("pointercancel", cancelDraft);
+
+window.addEventListener("blur", stopCameraDrag);
 window.addEventListener("blur", cancelDraft);
 
-document.querySelectorAll(".lab-controls button").forEach((button) => {
+Array.from(document.querySelectorAll(".lab-controls button")).forEach((button) => {
   button.addEventListener("pointerdown", stopControlClicks);
   button.addEventListener("click", stopControlClicks);
 });
@@ -1827,6 +2341,7 @@ document.addEventListener("fullscreenchange", syncFullscreenState);
 window.addEventListener("resize", resizeCanvas);
 
 setupSounds();
+createMassPanel();
 resizeCanvas();
 updateHud();
 draw();
