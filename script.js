@@ -99,15 +99,20 @@ let lastMassPanelBodyIds = "";
 
 const SOUND_VOLUME = 0.65;
 const LOOP_VOLUME = 0.18;
+const BLACK_HOLE_LOOP_VOLUME = LOOP_VOLUME;
+const BLACK_HOLE_SOUND_MIN_SCREEN_RADIUS = 8;
+const BLACK_HOLE_SOUND_FULL_SCREEN_RADIUS = 95;
 const SOUND_FADE_MS = 4000;
 const LOOP_CROSSFADE_SECONDS = 4;
+const BLACK_HOLE_SOUND_SCREEN_RANGE = 0.72;
 
 const SOUND_FILES = {
   planetAdd: "Orbit/planetadd.wav",
   planetChange: "Orbit/planetchange.wav",
   planetGrow: "Orbit/planetgrow.wav",
   planetLoop: "Orbit/planetloop.wav",
-  planetMerge: "Orbit/planetmerge.wav"
+  planetMerge: "Orbit/planetmerge.wav",
+  blackHole: "Orbit/blackhole.wav"
 };
 
 const sounds = {};
@@ -116,6 +121,12 @@ let loopSound = null;
 let nextLoopSound = null;
 let loopCrossfadeTimer = null;
 let loopIsStopping = false;
+
+let blackHoleLoopSound = null;
+let nextBlackHoleLoopSound = null;
+let blackHoleLoopTimer = null;
+let blackHoleLoopIsStopping = false;
+let blackHoleLoopTargetVolume = 0;
 
 function setupSounds() {
   Object.entries(SOUND_FILES).forEach(([name, src]) => {
@@ -346,6 +357,196 @@ function crossfadeToNextLoop(currentSound) {
   });
 }
 
+function startBlackHoleLoopSound(volume = BLACK_HOLE_LOOP_VOLUME) {
+  if (blackHoleLoopSound) {
+    blackHoleLoopTargetVolume = volume;
+    return;
+  }
+
+  const baseSound = sounds.blackHole;
+
+  if (!baseSound) {
+    return;
+  }
+
+  blackHoleLoopIsStopping = false;
+  blackHoleLoopTargetVolume = volume;
+
+  blackHoleLoopSound = createBlackHoleLoopInstance();
+  blackHoleLoopSound.volume = 0;
+
+  blackHoleLoopSound.play().then(() => {
+    fadeAudio(blackHoleLoopSound, blackHoleLoopTargetVolume, 900);
+    scheduleBlackHoleLoopCrossfade(blackHoleLoopSound);
+  }).catch(() => {
+    blackHoleLoopSound = null;
+  });
+}
+
+function stopBlackHoleLoopSound() {
+  blackHoleLoopIsStopping = true;
+  blackHoleLoopTargetVolume = 0;
+
+  if (blackHoleLoopTimer) {
+    clearTimeout(blackHoleLoopTimer);
+    blackHoleLoopTimer = null;
+  }
+
+  const current = blackHoleLoopSound;
+  const next = nextBlackHoleLoopSound;
+
+  blackHoleLoopSound = null;
+  nextBlackHoleLoopSound = null;
+
+  if (current) {
+    fadeAudio(current, 0, 900, () => {
+      current.pause();
+      current.currentTime = 0;
+    });
+  }
+
+  if (next) {
+    fadeAudio(next, 0, 900, () => {
+      next.pause();
+      next.currentTime = 0;
+    });
+  }
+}
+
+function createBlackHoleLoopInstance() {
+  const audio = sounds.blackHole.cloneNode();
+
+  audio.loop = false;
+  audio.volume = 0;
+  audio.currentTime = 0;
+  audio.muted = isMuted;
+
+  return audio;
+}
+
+function scheduleBlackHoleLoopCrossfade(currentSound) {
+  if (!currentSound || blackHoleLoopIsStopping) {
+    return;
+  }
+
+  const schedule = () => {
+    if (blackHoleLoopIsStopping || currentSound !== blackHoleLoopSound) {
+      return;
+    }
+
+    const duration = currentSound.duration;
+
+    if (!Number.isFinite(duration) || duration <= LOOP_CROSSFADE_SECONDS + 1) {
+      blackHoleLoopTimer = setTimeout(() => {
+        crossfadeToNextBlackHoleLoop(currentSound);
+      }, 10000);
+
+      return;
+    }
+
+    const delay = Math.max(500, (duration - LOOP_CROSSFADE_SECONDS) * 1000);
+
+    blackHoleLoopTimer = setTimeout(() => {
+      crossfadeToNextBlackHoleLoop(currentSound);
+    }, delay);
+  };
+
+  if (currentSound.readyState >= 1) {
+    schedule();
+  } else {
+    currentSound.addEventListener("loadedmetadata", schedule, { once: true });
+  }
+}
+
+function crossfadeToNextBlackHoleLoop(currentSound) {
+  if (blackHoleLoopIsStopping || currentSound !== blackHoleLoopSound) {
+    return;
+  }
+
+  nextBlackHoleLoopSound = createBlackHoleLoopInstance();
+  nextBlackHoleLoopSound.volume = 0;
+
+  nextBlackHoleLoopSound.play().then(() => {
+    fadeAudio(nextBlackHoleLoopSound, blackHoleLoopTargetVolume, LOOP_CROSSFADE_SECONDS * 1000);
+
+    fadeAudio(currentSound, 0, LOOP_CROSSFADE_SECONDS * 1000, () => {
+      currentSound.pause();
+      currentSound.currentTime = 0;
+    });
+
+    blackHoleLoopSound = nextBlackHoleLoopSound;
+    nextBlackHoleLoopSound = null;
+
+    scheduleBlackHoleLoopCrossfade(blackHoleLoopSound);
+  }).catch(() => {
+    scheduleBlackHoleLoopCrossfade(currentSound);
+  });
+}
+
+function updateBlackHoleLoopSound() {
+  const blackHoles = bodies.filter((body) => body.isBlackHole);
+
+  if (blackHoles.length === 0 || isMuted) {
+    stopBlackHoleLoopSound();
+    return;
+  }
+
+  const rect = labArea.getBoundingClientRect();
+  const centerX = rect.width / 2;
+  const centerY = rect.height / 2;
+  const maxDistance = Math.sqrt(centerX * centerX + centerY * centerY) * BLACK_HOLE_SOUND_SCREEN_RANGE;
+
+  let loudestVolume = 0;
+
+  blackHoles.forEach((blackHole) => {
+    const screenPoint = worldToScreen(blackHole.x, blackHole.y);
+    const dx = screenPoint.x - centerX;
+    const dy = screenPoint.y - centerY;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+
+    if (distance > maxDistance) {
+      return;
+    }
+
+    const apparentRadius = blackHole.radius * cameraZoom;
+
+    const distancePower = 1 - clamp(distance / maxDistance, 0, 1);
+    const sizePower = clamp(
+      (apparentRadius - BLACK_HOLE_SOUND_MIN_SCREEN_RADIUS) /
+        (BLACK_HOLE_SOUND_FULL_SCREEN_RADIUS - BLACK_HOLE_SOUND_MIN_SCREEN_RADIUS),
+      0,
+      1
+    );
+
+    const volume =
+      BLACK_HOLE_LOOP_VOLUME *
+      Math.pow(distancePower, 1.25) *
+      Math.pow(sizePower, 0.75);
+
+    if (volume > loudestVolume) {
+      loudestVolume = volume;
+    }
+  });
+
+  if (loudestVolume <= 0.005) {
+    stopBlackHoleLoopSound();
+    return;
+  }
+
+  startBlackHoleLoopSound(loudestVolume);
+
+  if (blackHoleLoopSound) {
+    blackHoleLoopSound.volume = lerp(blackHoleLoopSound.volume, loudestVolume, 0.06);
+  }
+
+  if (nextBlackHoleLoopSound) {
+    nextBlackHoleLoopSound.volume = lerp(nextBlackHoleLoopSound.volume, loudestVolume, 0.06);
+  }
+
+  blackHoleLoopTargetVolume = loudestVolume;
+}
+
+
 function applyMuteState() {
   Object.values(sounds).forEach((audio) => {
     audio.muted = isMuted;
@@ -362,6 +563,17 @@ function applyMuteState() {
   if (nextLoopSound) {
     nextLoopSound.muted = isMuted;
   }
+  if (blackHoleLoopSound) {
+  blackHoleLoopSound.muted = isMuted;
+}
+
+if (nextBlackHoleLoopSound) {
+  nextBlackHoleLoopSound.muted = isMuted;
+}
+
+if (isMuted) {
+  stopBlackHoleLoopSound();
+}
 }
 
 function resizeCanvas() {
@@ -656,11 +868,12 @@ function loop(now) {
   }
 
   draw();
-  updateHud();
+updateHud();
+updateBlackHoleLoopSound();
 
-  if (observationCooldown > 0) {
-    observationCooldown -= 1;
-  }
+if (observationCooldown > 0) {
+  observationCooldown -= 1;
+}
 
   animationId = requestAnimationFrame(loop);
   stopLoopIfIdle();
@@ -1421,6 +1634,7 @@ function createExplosion(x, y, color, amount, power) {
 function clearSpace() {
   stopGrowSound();
   stopSpaceLoopSound();
+  stopBlackHoleLoopSound();
 
   bodies = [];
   lastMassPanelSignature = "";
@@ -2867,5 +3081,6 @@ setupSounds();
 createMassPanel();
 createConfigPanel();
 resizeCanvas();
-updateHud();
 draw();
+updateHud();
+updateBlackHoleLoopSound();
