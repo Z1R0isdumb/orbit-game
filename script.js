@@ -29,7 +29,7 @@ const PHYSICS_STEP = 0.34;
 
 const GRAVITY_RADIUS_MULTIPLIER = 10;
 const MIN_GRAVITY_RADIUS = 35;
-const MAX_GRAVITY_RADIUS = 700;
+const MAX_GRAVITY_RADIUS = 1100;
 const GRAVITY_EDGE_FADE_START = 1;
 
 const GRAVITY_CAPTURE_STRENGTH = 0.018;
@@ -2397,12 +2397,18 @@ function addMoonToBody(parent) {
 
   const moonMass = Math.max(18, parent.mass * MOON_MASS_RATIO);
   const moonRadius = clamp(getRadiusForMass(moonMass), MIN_RADIUS + 2, MAX_RADIUS * 0.62);
-  const angle = Math.random() * Math.PI * 2;
-  const orbitDistance = clamp(
-    parent.radius * 3.8 + moonRadius * 2.2,
-    parent.radius + moonRadius + 55,
-    Math.max(parent.radius + moonRadius + 70, parent.gravityRadius * 0.62)
+
+  // Make sure the moon has room to spawn inside the parent's gravity field.
+  const safeInnerDistance = parent.radius + moonRadius + 28;
+  const safeOuterDistance = Math.max(
+    safeInnerDistance + 10,
+    parent.gravityRadius - moonRadius - 18
   );
+
+  // Random distance: sometimes close, sometimes far, always inside gravity range.
+  const orbitDistance = random(safeInnerDistance, safeOuterDistance);
+
+  const angle = Math.random() * Math.PI * 2;
 
   const moonX = parent.x + Math.cos(angle) * orbitDistance;
   const moonY = parent.y + Math.sin(angle) * orbitDistance;
@@ -2416,6 +2422,7 @@ function addMoonToBody(parent) {
   }
 
   const moonColor = COLORS[(bodies.length + 2) % COLORS.length];
+
   const moon = makeBody({
     x: moonX,
     y: moonY,
@@ -2432,6 +2439,7 @@ function addMoonToBody(parent) {
   moon.gravityRadius = getGravityRadiusForBody(moon);
 
   const orbitSpeed = getCircularOrbitSpeed(parent, orbitDistance);
+
   moon.velocityX = parent.velocityX + tangentX * orbitSpeed;
   moon.velocityY = parent.velocityY + tangentY * orbitSpeed;
   moon.orbitTarget = parent.id;
@@ -2441,8 +2449,13 @@ function addMoonToBody(parent) {
   moon.orbitAnnounced = true;
 
   bodies.push(moon);
+
+  lastMassPanelSignature = "";
+  lastMassPanelBodyIds = "";
+
   playSound("planetMerge");
-  setObservation("Moon Added", "A moon was placed with 10% of the selected mass and launched at orbital speed.", 180);
+  setObservation("Moon Added", "A moon was placed at a random distance inside the selected body's gravity field.", 180);
+  forceMassPanelRefresh();
 }
 
 function destroyBody(body) {
