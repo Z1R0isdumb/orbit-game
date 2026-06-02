@@ -14,9 +14,9 @@ const COLORS = ["#f7c948", "#42f5d7", "#7c3cff", "#ff4f8b", "#7cff6b", "#f97316"
 
 const G = 0.58;
 const SOFTENING = 760;
-const MIN_RADIUS = 10;
+const MIN_RADIUS = 3;
 const MAX_RADIUS = 110;
-const GROWTH_RATE = 0.04;
+const GROWTH_RATE = 0.015;
 const LAUNCH_SCALE = 0.038;
 const MAX_SPEED = 24;
 
@@ -56,6 +56,249 @@ let animationId = null;
 let isPaused = false;
 let lastTime = 0;
 let observationCooldown = 0;
+
+const SOUND_VOLUME = 0.65;
+const LOOP_VOLUME = 0.18;
+const SOUND_FADE_MS = 4000;
+const LOOP_CROSSFADE_SECONDS = 4;
+
+const SOUND_FILES = {
+  planetAdd: "Orbit/planetadd.wav",
+  planetChange: "Orbit/planetchange.wav",
+  planetGrow: "Orbit/planetgrow.wav",
+  planetLoop: "Orbit/planetloop.wav",
+  planetMerge: "Orbit/planetmerge.wav"
+};
+
+const sounds = {};
+let growSound = null;
+let loopSound = null;
+let nextLoopSound = null;
+let loopCrossfadeTimer = null;
+let loopIsStopping = false;
+
+function setupSounds() {
+  Object.entries(SOUND_FILES).forEach(([name, src]) => {
+    const audio = new Audio(src);
+    audio.preload = "auto";
+    audio.volume = SOUND_VOLUME;
+    sounds[name] = audio;
+  });
+}
+
+function playSound(name, volume = SOUND_VOLUME) {
+  const baseSound = sounds[name];
+
+  if (!baseSound) {
+    return;
+  }
+
+  const sound = baseSound.cloneNode();
+  sound.volume = volume;
+  sound.currentTime = 0;
+
+  sound.play().catch(() => {
+    // Browser blocked audio or file path is wrong.
+  });
+}
+
+function setAudioStartTime(audio, seconds) {
+  const setTime = () => {
+    try {
+      if (Number.isFinite(audio.duration) && audio.duration > seconds) {
+        audio.currentTime = seconds;
+      } else {
+        audio.currentTime = 0;
+      }
+    } catch (error) {
+      audio.currentTime = 0;
+    }
+  };
+
+  if (audio.readyState >= 1) {
+    setTime();
+  } else {
+    audio.addEventListener("loadedmetadata", setTime, { once: true });
+  }
+}
+
+function fadeAudio(audio, targetVolume, duration = SOUND_FADE_MS, onDone = null) {
+  const startVolume = audio.volume;
+  const startTime = performance.now();
+
+  function step(now) {
+    const progress = clamp((now - startTime) / duration, 0, 1);
+    audio.volume = startVolume + (targetVolume - startVolume) * progress;
+
+    if (progress < 1) {
+      requestAnimationFrame(step);
+    } else if (onDone) {
+      onDone();
+    }
+  }
+
+  requestAnimationFrame(step);
+}
+
+function startGrowSound() {
+  if (growSound) {
+    return;
+  }
+
+  const baseSound = sounds.planetGrow;
+
+  if (!baseSound) {
+    return;
+  }
+
+  growSound = baseSound.cloneNode();
+  growSound.loop = true;
+  growSound.volume = 0;
+
+  setAudioStartTime(growSound, 20);
+
+  growSound.play().then(() => {
+    fadeAudio(growSound, SOUND_VOLUME, SOUND_FADE_MS);
+  }).catch(() => {
+    growSound = null;
+  });
+}
+
+function stopGrowSound() {
+  if (!growSound) {
+    return;
+  }
+
+  const soundToStop = growSound;
+  growSound = null;
+
+  fadeAudio(soundToStop, 0, 250, () => {
+    soundToStop.pause();
+    soundToStop.currentTime = 0;
+  });
+}
+
+function startSpaceLoopSound() {
+  if (loopSound) {
+    return;
+  }
+
+  const baseSound = sounds.planetLoop;
+
+  if (!baseSound) {
+    return;
+  }
+
+  loopIsStopping = false;
+
+  loopSound = createLoopSoundInstance();
+  loopSound.volume = 0;
+
+  loopSound.play().then(() => {
+    fadeAudio(loopSound, LOOP_VOLUME, SOUND_FADE_MS);
+    scheduleLoopCrossfade(loopSound);
+  }).catch(() => {
+    loopSound = null;
+  });
+}
+
+function stopSpaceLoopSound() {
+  loopIsStopping = true;
+
+  if (loopCrossfadeTimer) {
+    clearTimeout(loopCrossfadeTimer);
+    loopCrossfadeTimer = null;
+  }
+
+  const current = loopSound;
+  const next = nextLoopSound;
+
+  loopSound = null;
+  nextLoopSound = null;
+
+  if (current) {
+    fadeAudio(current, 0, 500, () => {
+      current.pause();
+      current.currentTime = 0;
+    });
+  }
+
+  if (next) {
+    fadeAudio(next, 0, 500, () => {
+      next.pause();
+      next.currentTime = 0;
+    });
+  }
+}
+
+function createLoopSoundInstance() {
+  const audio = sounds.planetLoop.cloneNode();
+
+  audio.loop = false;
+  audio.volume = 0;
+  audio.currentTime = 0;
+
+  return audio;
+}
+
+function scheduleLoopCrossfade(currentSound) {
+  if (!currentSound || loopIsStopping) {
+    return;
+  }
+
+  const schedule = () => {
+    if (loopIsStopping || currentSound !== loopSound) {
+      return;
+    }
+
+    const duration = currentSound.duration;
+
+    if (!Number.isFinite(duration) || duration <= LOOP_CROSSFADE_SECONDS + 1) {
+      loopCrossfadeTimer = setTimeout(() => {
+        crossfadeToNextLoop(currentSound);
+      }, 10000);
+
+      return;
+    }
+
+    const delay = Math.max(500, (duration - LOOP_CROSSFADE_SECONDS) * 1000);
+
+    loopCrossfadeTimer = setTimeout(() => {
+      crossfadeToNextLoop(currentSound);
+    }, delay);
+  };
+
+  if (currentSound.readyState >= 1) {
+    schedule();
+  } else {
+    currentSound.addEventListener("loadedmetadata", schedule, { once: true });
+  }
+}
+
+function crossfadeToNextLoop(currentSound) {
+  if (loopIsStopping || currentSound !== loopSound) {
+    return;
+  }
+
+  nextLoopSound = createLoopSoundInstance();
+  nextLoopSound.volume = 0;
+
+  nextLoopSound.play().then(() => {
+    fadeAudio(nextLoopSound, LOOP_VOLUME, LOOP_CROSSFADE_SECONDS * 1000);
+
+    fadeAudio(currentSound, 0, LOOP_CROSSFADE_SECONDS * 1000, () => {
+      currentSound.pause();
+      currentSound.currentTime = 0;
+    });
+
+    loopSound = nextLoopSound;
+    nextLoopSound = null;
+
+    scheduleLoopCrossfade(loopSound);
+  }).catch(() => {
+    scheduleLoopCrossfade(currentSound);
+  });
+}
 
 function resizeCanvas() {
   const rect = labArea.getBoundingClientRect();
@@ -134,7 +377,9 @@ function startDraft(event) {
   draftBody.startTime = performance.now();
 
   setObservation("Observations", "Mass is forming. Hold longer to create a heavier body.", 0);
+  startGrowSound();
 
+  
   try {
     labArea.setPointerCapture(event.pointerId);
   } catch (error) {
@@ -174,6 +419,8 @@ function releaseDraft(event) {
   }
 
   updateDraftBody();
+  stopGrowSound();
+playSound("planetAdd");
 
 draftBody.gravity = getGravityForBody(draftBody);
 
@@ -196,7 +443,13 @@ draftBody.gravity = getGravityForBody(draftBody);
   draftBody.orbitRadius = parent ? getDistance(draftBody, parent) : null;
   draftBody.orbitKind = parent && !isMainMass(parent) ? "moon" : parent ? "planet" : "free";
 
-  bodies.push(draftBody);
+  const wasFirstBody = bodies.length === 0;
+
+bodies.push(draftBody);
+
+if (wasFirstBody) {
+  startSpaceLoopSound();
+}
   reassignParentLocks();
 
   if (parent) {
@@ -225,6 +478,8 @@ draftBody.gravity = getGravityForBody(draftBody);
 }
 
 function cancelDraft() {
+  stopGrowSound();
+
   if (draftBody) {
     releaseDraft();
   }
@@ -239,7 +494,7 @@ function updateDraftBody() {
   const radius = clamp(MIN_RADIUS + holdTime * GROWTH_RATE, MIN_RADIUS, MAX_RADIUS);
 
   draftBody.radius = radius;
-  draftBody.mass = radius * radius;
+  draftBody.mass = getMassForRadius(radius);
 }
 
 function makeBody({ x, y, radius, color, velocityX, velocityY, isDraft = false }) {
@@ -248,7 +503,7 @@ function makeBody({ x, y, radius, color, velocityX, velocityY, isDraft = false }
     x,
     y,
     radius,
-  mass: radius * radius,
+  mass: getMassForRadius(radius),
     gravity: 1,
     color,
     velocityX,
@@ -602,6 +857,7 @@ function detectOrbits() {
       body.lockedOrbit = true;
       body.orbitRadius = orbitStatus.averageDistance || distance;
       body.trail = [];
+      playSound("planetMerge");
 
       forceCircularOrbit(body, target);
 
@@ -1048,7 +1304,7 @@ function mergeBodies(a, b) {
   a.x = mergedX;
   a.y = mergedY;
   a.mass = totalMass;
-  a.radius = Math.sqrt(totalMass);
+  a.radius = getRadiusForMass(totalMass);
   a.velocityX = mergedVX;
   a.velocityY = mergedVY;
   a.color = dominant.color;
@@ -1066,13 +1322,15 @@ function mergeBodies(a, b) {
   bodies = bodies.filter((body) => body !== b);
 
   reassignParentLocks();
-  createExplosion(mergedX, mergedY, dominant.color, 22, 0.9);
-  setObservation("Fusion", "Masses collided and merged into a larger body.", 180);
+  playSound("planetMerge");
+createExplosion(mergedX, mergedY, dominant.color, 22, 0.9);
+setObservation("Fusion", "Masses collided and merged into a larger body.", 180);
 }
 
 function shatterBodies(a, b, speed) {
   const x = (a.x + b.x) / 2;
   const y = (a.y + b.y) / 2;
+  playSound("planetChange");
 
   createFragments(a, speed);
   createFragments(b, speed);
@@ -1129,6 +1387,9 @@ function createExplosion(x, y, color, amount, power) {
 }
 
 function clearSpace() {
+  stopGrowSound();
+  stopSpaceLoopSound();
+
   bodies = [];
   debris = [];
   draftBody = null;
@@ -1462,6 +1723,15 @@ function random(min, max) {
   return Math.random() * (max - min) + min;
 }
 
+
+function getMassForRadius(radius) {
+  return Math.max(0, radius * radius - MIN_RADIUS * MIN_RADIUS);
+}
+
+function getRadiusForMass(mass) {
+  return Math.sqrt(Math.max(0, mass) + MIN_RADIUS * MIN_RADIUS);
+}
+
 function hexToRgb(hex) {
   if (!hex || typeof hex !== "string") {
     return { r: 255, g: 255, b: 255 };
@@ -1556,6 +1826,7 @@ if (fullscreenButton) {
 document.addEventListener("fullscreenchange", syncFullscreenState);
 window.addEventListener("resize", resizeCanvas);
 
+setupSounds();
 resizeCanvas();
 updateHud();
 draw();
