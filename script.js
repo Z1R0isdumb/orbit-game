@@ -88,6 +88,11 @@ let cameraStartY = 0;
 let massPanel = null;
 let massPanelList = null;
 
+let configPanel = null;
+let hideTrails = false;
+let isMuted = false;
+let hideAllUi = false;
+
 const SOUND_VOLUME = 0.65;
 const LOOP_VOLUME = 0.18;
 const SOUND_FADE_MS = 4000;
@@ -117,7 +122,12 @@ function setupSounds() {
   });
 }
 
+
+
 function playSound(name, volume = SOUND_VOLUME) {
+  if (isMuted) {
+  return;
+}
   const baseSound = sounds[name];
 
   if (!baseSound) {
@@ -268,6 +278,7 @@ function createLoopSoundInstance() {
   audio.loop = false;
   audio.volume = 0;
   audio.currentTime = 0;
+  audio.muted = isMuted;
 
   return audio;
 }
@@ -329,6 +340,24 @@ function crossfadeToNextLoop(currentSound) {
   }).catch(() => {
     scheduleLoopCrossfade(currentSound);
   });
+}
+
+function applyMuteState() {
+  Object.values(sounds).forEach((audio) => {
+    audio.muted = isMuted;
+  });
+
+  if (growSound) {
+    growSound.muted = isMuted;
+  }
+
+  if (loopSound) {
+    loopSound.muted = isMuted;
+  }
+
+  if (nextLoopSound) {
+    nextLoopSound.muted = isMuted;
+  }
 }
 
 function resizeCanvas() {
@@ -1473,17 +1502,24 @@ function draw() {
   ctx.translate(-cameraX, -cameraY);
 
   drawGravityWells();
+
+if (!hideAllUi) {
   drawGravityRadiusRings();
+}
+
   drawTrails();
   drawDebris();
 
   bodies.forEach(drawBody);
 
   if (draftBody) {
+  if (!hideAllUi) {
     drawAimLine(draftBody);
     drawGravityRadiusRing(draftBody, 0.32);
-    drawBody(draftBody);
   }
+
+  drawBody(draftBody);
+}
 
   ctx.restore();
 }
@@ -1523,6 +1559,9 @@ function drawGravityRadiusRing(body, alpha) {
 }
 
 function drawTrails() {
+  if (hideTrails) {
+  return;
+}
   bodies.forEach((body) => {
     if (body.trail.length < 3) {
       return;
@@ -1559,7 +1598,11 @@ function drawDebris() {
 function drawBody(body) {
   if (body.isBlackHole) {
     drawBlackHole(body);
-    drawMassLabel(body);
+
+    if (!hideAllUi) {
+      drawMassLabel(body);
+    }
+
     return;
   }
 
@@ -1584,7 +1627,10 @@ function drawBody(body) {
   ctx.restore();
 
   drawPlanetRim(body);
-  drawMassLabel(body);
+
+  if (!hideAllUi) {
+    drawMassLabel(body);
+  }
 }
 
 function drawBlackHole(body) {
@@ -2182,7 +2228,7 @@ function addMoonToBody(parent) {
 
   bodies.push(moon);
   playSound("planetMerge");
-  setObservation("Moon Added", "A moon was placed with 20% of the selected mass and launched at orbital speed.", 180);
+  setObservation("Moon Added", "A moon was placed with 10% of the selected mass and launched at orbital speed.", 180);
 }
 
 function destroyBody(body) {
@@ -2226,6 +2272,202 @@ function absorbIntoBlackHole(blackHole, otherBody) {
   playSound("planetMerge");
   createExplosion(blackHole.x, blackHole.y, "#b9a0ff", 18, 0.85);
   setObservation("Absorbed", "The black hole absorbed a mass and stayed fixed in place.", 160);
+}
+
+function createConfigPanel() {
+  if (configPanel) {
+    return;
+  }
+
+  injectConfigPanelStyles();
+
+  configPanel = document.createElement("aside");
+  configPanel.className = "config-panel";
+  configPanel.innerHTML = `
+    <button class="config-button" type="button" aria-label="Open settings">⚙</button>
+
+    <div class="config-card">
+      <div class="config-title">Settings</div>
+
+      <label class="config-option">
+        <input type="checkbox" data-setting="hideTrails">
+        <span>Hide trails</span>
+      </label>
+
+      <label class="config-option">
+        <input type="checkbox" data-setting="mute">
+        <span>Mute</span>
+      </label>
+
+      <label class="config-option">
+        <input type="checkbox" data-setting="hideAllUi">
+        <span>Hide all UI</span>
+      </label>
+    </div>
+  `;
+
+  labArea.appendChild(configPanel);
+
+  configPanel.addEventListener("pointerdown", stopPanelInteraction, true);
+  configPanel.addEventListener("pointerup", stopPanelInteraction, true);
+  configPanel.addEventListener("click", stopPanelInteraction, true);
+  configPanel.addEventListener("change", handleConfigChange);
+  configPanel.addEventListener("mouseleave", () => {
+  if (document.activeElement && configPanel.contains(document.activeElement)) {
+    document.activeElement.blur();
+  }
+});
+}
+
+function injectConfigPanelStyles() {
+  if (document.getElementById("config-panel-styles")) {
+    return;
+  }
+
+  const style = document.createElement("style");
+  style.id = "config-panel-styles";
+  style.textContent = `
+    .config-panel {
+      position: absolute;
+      right: 18px;
+      bottom: 18px;
+      z-index: 200;
+      display: flex;
+      flex-direction: column-reverse;
+      align-items: flex-end;
+      gap: 10px;
+      font-family: inherit;
+      pointer-events: auto;
+}
+
+    .config-button {
+      width: 44px;
+      height: 44px;
+      display: grid;
+      place-items: center;
+      border-radius: 999px;
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      background: rgba(0, 0, 0, 0.78);
+      color: rgba(255, 255, 255, 0.9);
+      font-size: 1rem;
+      cursor: pointer;
+      backdrop-filter: blur(12px);
+      box-shadow: 0 14px 34px rgba(0, 0, 0, 0.34);
+    }
+
+    .config-card {
+      width: 185px;
+      padding: 12px;
+      border-radius: 18px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      background: rgba(0, 0, 0, 0.82);
+      box-shadow: 0 18px 60px rgba(0, 0, 0, 0.42);
+     backdrop-filter: blur(14px);
+      opacity: 0;
+     transform: translateY(12px);
+      pointer-events: none;
+     transition: opacity 180ms ease, transform 180ms ease;
+}
+
+   .config-panel:hover .config-card {
+   opacity: 1;
+   transform: translateY(0);
+    pointer-events: auto;
+}
+
+    .config-title {
+      margin-bottom: 10px;
+      color: rgba(255, 255, 255, 0.9);
+      font-size: 0.74rem;
+      font-weight: 900;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+    }
+
+    .config-option {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 9px 8px;
+      border-radius: 12px;
+      color: rgba(255, 255, 255, 0.78);
+      font-size: 0.78rem;
+      font-weight: 800;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .config-option:hover {
+      background: rgba(255, 255, 255, 0.07);
+    }
+
+    .config-option input {
+      width: 15px;
+      height: 15px;
+      accent-color: #42f5d7;
+      cursor: pointer;
+    }
+
+    body.hide-game-ui .lab-controls,
+    body.hide-game-ui .mass-panel {
+      opacity: 0 !important;
+      pointer-events: none !important;
+    }
+
+    body.hide-game-ui .config-panel {
+      opacity: 1 !important;
+      pointer-events: auto !important;
+    }
+  `;
+
+  document.head.appendChild(style);
+}
+
+function handleConfigChange(event) {
+  const input = event.target.closest("input[data-setting]");
+
+  if (!input) {
+    return;
+  }
+
+  const setting = input.dataset.setting;
+
+  if (setting === "hideTrails") {
+    hideTrails = input.checked;
+  }
+
+  if (setting === "mute") {
+    isMuted = input.checked;
+    applyMuteState();
+  }
+
+  if (setting === "hideAllUi") {
+    hideAllUi = input.checked;
+    applyUiVisibility();
+  }
+
+  draw();
+}
+
+function applyUiVisibility() {
+  document.body.classList.toggle("hide-game-ui", hideAllUi);
+
+  const controls = document.querySelector(".lab-controls");
+  const bodyStat = bodyCount ? bodyCount.closest("div") : null;
+  const massStat = massTotal ? massTotal.closest("div") : null;
+  const observationBox = observationTitle ? observationTitle.closest("aside, section, div") : null;
+
+if (debrisStat) {
+  debrisStat.style.display = "none";
+}
+
+[controls, bodyStat, massStat, observationBox, massPanel].forEach((element) => {
+  if (!element || element.closest(".config-panel")) {
+    return;
+  }
+
+  element.style.display = hideAllUi ? "none" : "";
+});
 }
 
 function stopControlClicks(event) {
@@ -2342,6 +2584,7 @@ window.addEventListener("resize", resizeCanvas);
 
 setupSounds();
 createMassPanel();
+createConfigPanel();
 resizeCanvas();
 updateHud();
 draw();
